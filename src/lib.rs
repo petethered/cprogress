@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod engine;
 pub mod fmt;
 pub mod help;
 pub mod plan;
