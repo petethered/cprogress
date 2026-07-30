@@ -112,8 +112,8 @@ impl Runner<'_> {
         }
     }
 
-    fn copy_file(&mut self, src: &Path, dst: &Path, size: u64) {
-        self.progress.file_started(src, size);
+    fn copy_file(&mut self, src: &Path, dst: &Path, size: u64, display: &Path) {
+        self.progress.file_started(display, size);
 
         let mut input = match File::open(src) {
             Ok(f) => f,
@@ -215,7 +215,9 @@ pub fn run(
                 runner.symlink(target, dst);
                 runner.verbose(src, dst);
             }
-            CopyOp::CopyFile { src, dst, size } => runner.copy_file(src, dst, *size),
+            CopyOp::CopyFile { src, dst, size, display } => {
+                runner.copy_file(src, dst, *size, display)
+            }
         }
     }
 
@@ -475,6 +477,47 @@ mod tests {
         assert!(
             out.contains(&format!("{} -> ", src.join("sub").display())),
             "directory not reported with its source: {out:?}"
+        );
+    }
+
+    #[test]
+    fn progress_file_line_gets_a_root_relative_path_not_the_absolute_source() {
+        // The progress bar's per-file line must show a path relative to the
+        // source root (e.g. "s/sub/g.txt"), not the full absolute source
+        // path — otherwise a long tempdir/absolute prefix crowds out the
+        // useful tail on a real terminal. `-v` is unaffected: it keeps using
+        // the full paths (see verbose_reports_each_copy and
+        // verbose_names_the_real_source_for_directories_and_symlinks).
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("s");
+        fs::create_dir_all(src.join("sub")).expect("mkdir");
+        fs::write(src.join("sub/g.txt"), b"hi").expect("write");
+        let dst = td.path().join("d");
+
+        struct Recorder {
+            seen: Vec<PathBuf>,
+        }
+        impl crate::progress::Progress for Recorder {
+            fn scan_tick(&mut self, _f: usize, _b: u64) {}
+            fn start(&mut self, _t: u64, _c: usize) {}
+            fn file_started(&mut self, p: &Path, _s: u64) {
+                self.seen.push(p.to_path_buf());
+            }
+            fn advance(&mut self, _bytes: u64) {}
+            fn note(&mut self, _l: &str) {}
+            fn finish(&mut self) {}
+        }
+
+        let p = plan_for(std::slice::from_ref(&src), &dst, &recursive());
+        let mut recorder = Recorder { seen: Vec::new() };
+        let flag = AtomicBool::new(false);
+        run(&p, &recursive(), &mut recorder, &flag);
+
+        assert_eq!(recorder.seen, vec![PathBuf::from("s/sub/g.txt")]);
+        assert!(
+            !recorder.seen[0].starts_with(td.path()),
+            "file line still carries the absolute prefix: {:?}",
+            recorder.seen[0]
         );
     }
 

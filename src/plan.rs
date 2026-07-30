@@ -1,7 +1,7 @@
 use crate::cli::Options;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Every variant carries `src` so `-v` can report `src -> dst` for directories
@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyOp {
     CreateDir { src: PathBuf, dst: PathBuf, mode: u32 },
-    CopyFile { src: PathBuf, dst: PathBuf, size: u64 },
+    /// `display` is `src` shortened to be relative to the source root's
+    /// parent directory (falling back to `src` itself when a relative form
+    /// cannot be derived). It exists only for the progress bar's per-file
+    /// line, which would otherwise be dominated by a long absolute prefix;
+    /// `-v` and error messages keep using `src`/`dst` in full.
+    CopyFile { src: PathBuf, dst: PathBuf, size: u64, display: PathBuf },
     Symlink { src: PathBuf, target: PathBuf, dst: PathBuf },
 }
 
@@ -26,7 +31,6 @@ pub struct Plan {
 #[derive(Debug)]
 pub enum PlanError {
     DestNotDirectory(PathBuf),
-    DestInsideSource { src: PathBuf, dst: PathBuf },
 }
 
 impl std::fmt::Display for PlanError {
@@ -35,13 +39,34 @@ impl std::fmt::Display for PlanError {
             PlanError::DestNotDirectory(p) => {
                 write!(f, "cprogress: {}: Not a directory", p.display())
             }
-            PlanError::DestInsideSource { src, dst } => write!(
-                f,
-                "cprogress: {} and {} are identical (not copied).",
-                src.display(),
-                dst.display()
-            ),
         }
+    }
+}
+
+/// True when `a` and `b` resolve to the same file: same device and inode.
+/// This is what `cp` actually rejects ("are identical (not copied)."), not
+/// path nesting — a hard link to the same file has a different path but the
+/// same identity, which a string or canonicalized-path comparison would miss.
+/// Symlinks are followed (`fs::metadata`), matching `cp`'s own stat-based
+/// check. If either side cannot be stat'd, this reports no match rather than
+/// failing the whole plan over it.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(am), Ok(bm)) = (fs::metadata(a), fs::metadata(b)) else {
+        return false;
+    };
+    am.dev() == bm.dev() && am.ino() == bm.ino()
+}
+
+/// Compute a short display path for `src`, relative to `root_parent` (the
+/// parent directory of the source argument the user passed on the command
+/// line). Falls back to the full `src` when it cannot be made relative —
+/// e.g. `root_parent` is empty or unrelated — since a wrong-but-harmless
+/// fallback beats failing the whole plan over a cosmetic label.
+fn display_path(src: &Path, root_parent: &Path) -> PathBuf {
+    match src.strip_prefix(root_parent) {
+        Ok(rel) if rel.as_os_str().is_empty() => src.to_path_buf(),
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => src.to_path_buf(),
     }
 }
 
@@ -58,15 +83,19 @@ impl Scanner<'_> {
             .push(format!("cprogress: {}: {}", path.display(), err));
     }
 
-    fn add_file(&mut self, src: PathBuf, dst: PathBuf, size: u64) {
-        self.plan.ops.push(CopyOp::CopyFile { src, dst, size });
+    fn add_file(&mut self, src: PathBuf, dst: PathBuf, size: u64, root_parent: &Path) {
+        let display = display_path(&src, root_parent);
+        self.plan.ops.push(CopyOp::CopyFile { src, dst, size, display });
         self.plan.total_bytes = self.plan.total_bytes.saturating_add(size);
         self.plan.file_count += 1;
         (self.tick)(self.plan.file_count, self.plan.total_bytes);
     }
 
-    /// Add `src` at `dst`, recursing if it is a directory.
-    fn visit(&mut self, src: &Path, dst: &Path, top_level: bool) {
+    /// Add `src` at `dst`, recursing if it is a directory. `root_parent` is
+    /// the parent directory of the top-level source this call descends from;
+    /// it stays fixed across the recursion so every file's display path is
+    /// relative to the same root, however deep it is nested.
+    fn visit(&mut self, src: &Path, dst: &Path, top_level: bool, root_parent: &Path) {
         let meta = match fs::symlink_metadata(src) {
             Ok(m) => m,
             Err(e) => {
@@ -118,13 +147,13 @@ impl Scanner<'_> {
             // Sorted so a given tree always yields the same plan.
             names.sort();
             for name in names {
-                self.visit(&src.join(&name), &dst.join(&name), false);
+                self.visit(&src.join(&name), &dst.join(&name), false, root_parent);
             }
             return;
         }
 
         if meta.is_file() {
-            self.add_file(src.to_path_buf(), dst.to_path_buf(), meta.len());
+            self.add_file(src.to_path_buf(), dst.to_path_buf(), meta.len(), root_parent);
             return;
         }
 
@@ -150,42 +179,6 @@ fn destination_for(src: &Path, dest: &Path, dest_is_dir: bool) -> PathBuf {
     }
 }
 
-/// True when `dst` lies inside `src`, which would recurse forever.
-///
-/// `dst` usually does not exist yet, so it cannot be canonicalized directly.
-/// Walk up from `dst` to the nearest ancestor that does exist (stopping at
-/// most at the filesystem root, which always does), canonicalize that
-/// ancestor, then reattach the stripped-off components. This handles a
-/// destination several directories deep with none of them created yet, not
-/// just an immediate parent — a single-level fallback (checking only
-/// `dst.parent()`) misses `s` vs `s/a/b` when neither `a` nor `b` exists.
-fn dest_inside_source(src: &Path, dst: &Path) -> bool {
-    let Ok(src_c) = src.canonicalize() else {
-        return false;
-    };
-
-    let mut existing = dst;
-    let mut suffix: Vec<&std::ffi::OsStr> = Vec::new();
-    while !existing.exists() {
-        match (existing.file_name(), existing.parent()) {
-            (Some(name), Some(parent)) => {
-                suffix.push(name);
-                existing = parent;
-            }
-            _ => break,
-        }
-    }
-
-    let Ok(mut dst_c) = existing.canonicalize() else {
-        return false;
-    };
-    for name in suffix.into_iter().rev() {
-        dst_c = dst_c.join(name);
-    }
-
-    dst_c.starts_with(&src_c)
-}
-
 pub fn build(
     sources: &[PathBuf],
     dest: &Path,
@@ -199,15 +192,6 @@ pub fn build(
         return Err(PlanError::DestNotDirectory(dest.to_path_buf()));
     }
 
-    for src in sources {
-        if src.is_dir() && dest_inside_source(src, dest) {
-            return Err(PlanError::DestInsideSource {
-                src: src.clone(),
-                dst: dest.to_path_buf(),
-            });
-        }
-    }
-
     let mut scanner = Scanner {
         plan: Plan::default(),
         opts,
@@ -216,7 +200,22 @@ pub fn build(
 
     for src in sources {
         let target = destination_for(src, dest, dest_is_dir);
-        scanner.visit(src, &target, true);
+
+        // What real `cp` actually rejects is copying a file onto itself, not
+        // a destination nested inside a source directory (see module docs
+        // on `same_file`). Skip this source without emitting any op for it;
+        // the run continues with the rest.
+        if same_file(src, &target) {
+            scanner.plan.errors.push(format!(
+                "cprogress: {} and {} are identical (not copied).",
+                src.display(),
+                target.display()
+            ));
+            continue;
+        }
+
+        let root_parent = src.parent().unwrap_or(Path::new(""));
+        scanner.visit(src, &target, true, root_parent);
     }
 
     Ok(scanner.plan)
@@ -355,14 +354,120 @@ mod tests {
     }
 
     #[test]
-    fn copying_a_directory_into_itself_is_rejected() {
+    fn destination_nested_in_source_is_allowed_like_cp() {
+        // Verified against /bin/cp: `cp -R s s/inner` succeeds (exit 0),
+        // producing s/inner/f.txt. cp snapshots the directory listing before
+        // copying, so `inner` is never re-visited — and so do we, since
+        // plan::build finishes the whole scan before engine::run creates
+        // anything. This used to be rejected as DestInsideSource, which was
+        // a spec defect: cp only rejects a source and destination resolving
+        // to the *same file* (see `same_file_source_and_dest_is_reported`).
         let td = tempfile::tempdir().expect("tempdir");
         let src = td.path().join("s");
         fs::create_dir(&src).expect("mkdir");
+        fs::write(src.join("f.txt"), b"hi").expect("write");
         let dst = src.join("inner");
 
-        let err = build_in(&[src], &dst, &opts(true)).expect_err("should fail");
-        assert!(matches!(err, PlanError::DestInsideSource { .. }));
+        let plan =
+            build_in(std::slice::from_ref(&src), &dst, &opts(true)).expect("plan should succeed");
+        assert!(plan.errors.is_empty(), "got errors: {:?}", plan.errors);
+        assert_eq!(plan.file_count, 1);
+        assert!(plan
+            .ops
+            .iter()
+            .any(|o| matches!(o, CopyOp::CopyFile { dst, .. } if dst.ends_with("inner/f.txt"))));
+    }
+
+    #[test]
+    fn same_file_source_and_dest_is_reported_and_produces_no_op() {
+        // Matches `cp a.txt a.txt`: "cp: a.txt and a.txt are identical (not
+        // copied)." and exit 1. This is non-fatal at the plan level: it is
+        // recorded in `errors`, not returned as a `PlanError`.
+        let td = tempfile::tempdir().expect("tempdir");
+        let a = td.path().join("a.txt");
+        fs::write(&a, b"x").expect("write");
+
+        let plan = build_in(std::slice::from_ref(&a), &a, &opts(false)).expect("plan");
+        assert!(plan.ops.is_empty());
+        assert_eq!(plan.total_bytes, 0);
+        assert_eq!(plan.errors.len(), 1);
+        assert_eq!(
+            plan.errors[0],
+            format!(
+                "cprogress: {} and {} are identical (not copied).",
+                a.display(),
+                a.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_hard_link_to_the_same_inode_is_reported_as_identical() {
+        // Same underlying file via two different names: a path/string
+        // comparison would miss this, but dev+inode comparison catches it.
+        let td = tempfile::tempdir().expect("tempdir");
+        let a = td.path().join("a.txt");
+        fs::write(&a, b"x").expect("write");
+        let link = td.path().join("link.txt");
+        fs::hard_link(&a, &link).expect("hard_link");
+
+        let plan = build_in(&[a], &link, &opts(false)).expect("plan");
+        assert!(plan.ops.is_empty());
+        assert_eq!(plan.errors.len(), 1);
+        assert!(
+            plan.errors[0].contains("identical (not copied)"),
+            "got {:?}",
+            plan.errors[0]
+        );
+    }
+
+    #[test]
+    fn two_files_with_identical_content_but_different_inodes_are_not_flagged() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let a = td.path().join("a.txt");
+        let b = td.path().join("b.txt");
+        fs::write(&a, b"same content").expect("write");
+        fs::write(&b, b"same content").expect("write");
+
+        let plan = build_in(&[a], &b, &opts(false)).expect("plan");
+        assert!(plan.errors.is_empty(), "got errors: {:?}", plan.errors);
+        assert_eq!(plan.file_count, 1);
+    }
+
+    #[test]
+    fn a_nested_files_display_path_is_relative_to_the_source_root() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("s");
+        fs::create_dir_all(src.join("sub")).expect("mkdir");
+        fs::write(src.join("sub/g.txt"), b"123").expect("write");
+        let dst = td.path().join("d");
+
+        let plan = build_in(&[src], &dst, &opts(true)).expect("plan");
+        let display = plan
+            .ops
+            .iter()
+            .find_map(|o| match o {
+                CopyOp::CopyFile { dst, display, .. } if dst.ends_with("g.txt") => {
+                    Some(display.clone())
+                }
+                _ => None,
+            })
+            .expect("file op");
+        assert_eq!(display, Path::new("s/sub/g.txt"));
+    }
+
+    #[test]
+    fn a_top_level_files_display_path_has_no_absolute_prefix() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("a.txt");
+        fs::write(&src, b"hello").expect("write");
+        let dst = td.path().join("b.txt");
+
+        let plan = build_in(&[src], &dst, &opts(false)).expect("plan");
+        match &plan.ops[0] {
+            CopyOp::CopyFile { display, .. } => assert_eq!(display, Path::new("a.txt")),
+            other => panic!("wrong op: {other:?}"),
+        }
     }
 
     #[test]
@@ -410,34 +515,5 @@ mod tests {
 
         assert_eq!(plan.file_count, 5);
         assert_eq!(seen.last().copied(), Some((5, 10)));
-    }
-}
-
-#[cfg(test)]
-mod dest_inside_source_tests {
-    use super::*;
-
-    #[test]
-    fn detects_nesting_several_nonexistent_levels_deep() {
-        // `s/a/b` where neither `a` nor `b` exists yet: a fallback that only
-        // checks `dst.parent()` misses this, since that parent (`s/a`) also
-        // doesn't exist and its canonicalize() fails.
-        let td = tempfile::tempdir().expect("tempdir");
-        let src = td.path().join("s");
-        fs::create_dir(&src).expect("mkdir");
-        let dst = src.join("a").join("b");
-        assert!(
-            dest_inside_source(&src, &dst),
-            "should detect nesting two levels deep"
-        );
-    }
-
-    #[test]
-    fn sibling_destination_is_not_flagged_as_nested() {
-        let td = tempfile::tempdir().expect("tempdir");
-        let src = td.path().join("s");
-        fs::create_dir(&src).expect("mkdir");
-        let dst = td.path().join("other").join("deeper");
-        assert!(!dest_inside_source(&src, &dst));
     }
 }
