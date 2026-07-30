@@ -1,0 +1,110 @@
+.Dd July 30, 2026
+.Dt CPROGRESS 1
+.Os
+.Sh NAME
+.Nm cprogress
+.Nd copy files with a progress bar
+.Sh SYNOPSIS
+.Nm
+.Op Fl R | r
+.Op Fl f
+.Op Fl v
+.Op Fl -progress Ns = Ns Ar auto | force | none
+.Ar source_file target_file
+.Nm
+.Op Fl R | r
+.Op Fl f
+.Op Fl v
+.Op Fl -progress Ns = Ns Ar auto | force | none
+.Ar source_file ... target_directory
+.Sh DESCRIPTION
+.Nm
+copies files the way
+.Xr cp 1
+does, and prints a wget-style progress bar while it works.
+.Pp
+In the first form,
+.Ar source_file
+is copied to
+.Ar target_file .
+In the second form, each
+.Ar source_file
+is copied into the existing
+.Ar target_directory .
+.Pp
+Before copying,
+.Nm
+walks the sources to total up the bytes, so the percentage and estimated time
+are accurate from the first frame. The scan reads metadata only.
+.Pp
+The display is two lines: an aggregate bar for the whole operation, and a bar
+for the file being copied. Files smaller than 8 MiB show only their path,
+because a bar that fills within a single read is noise rather than information.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl R , r
+Copy directory hierarchies recursively. Symbolic links are recreated as
+symbolic links rather than followed, matching the default behavior of
+.Nm cp Fl R .
+.It Fl f
+If a destination file cannot be opened for writing, remove it and try again.
+.It Fl v
+Print the name of each file as it is copied.
+.It Fl h , -help
+Print the manual and exit.
+.It Fl -progress Ns = Ns Ar auto | force | none
+Control the progress display.
+.Ar auto ,
+the default, draws the bar only when standard error is a terminal.
+.Ar force
+always draws it.
+.Ar none
+never does.
+.El
+.Sh UNSUPPORTED OPTIONS
+The following
+.Xr cp 1
+options are not implemented and are rejected with an error rather than
+ignored, so that a script relying on one fails visibly:
+.Pp
+.Dl Fl p Fl i Fl n Fl a Fl c Fl l Fl s Fl X Fl H Fl L Fl P
+.Pp
+Extended attributes and access control lists are not copied.
+.Sh FILE PERMISSIONS
+A newly created file or directory takes the source's permission bits masked by
+the current umask. An existing destination file keeps its own permissions. Both
+match
+.Xr cp 1 .
+.Pp
+Ownership, timestamps, and BSD file flags are not preserved; that is what
+.Nm cp Fl p
+would provide, and
+.Fl p
+is not supported.
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+All files were copied successfully.
+.It 1
+At least one file could not be copied.
+.It 64
+The command line was malformed.
+.It 130
+The copy was interrupted with SIGINT.
+.El
+.Sh EXAMPLES
+Copy a directory tree, replacing anything already at the destination:
+.Pp
+.Dl cprogress -Rf ~/Photos /Volumes/Backup/Photos
+.Pp
+Use it in place of
+.Xr cp 1
+everywhere. The bar is suppressed when standard error is not a terminal, so
+scripts see exactly what
+.Xr cp 1
+would print:
+.Pp
+.Dl alias cp=cprogress
+.Sh SEE ALSO
+.Xr cp 1
