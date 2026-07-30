@@ -139,7 +139,7 @@ exactly where 100 GB copies tend to happen.
 trait Progress {
     fn scan_tick(&mut self, files: usize, bytes: u64);
     fn start(&mut self, total_bytes: u64, file_count: usize);
-    fn file_started(&mut self, path: &Path);
+    fn file_started(&mut self, path: &Path, size: u64);
     fn advance(&mut self, bytes: u64);
     fn note(&mut self, line: &str);
     fn finish(&mut self);
@@ -166,16 +166,40 @@ Scan phase:
 Scanning... 41,203 files, 88.2G
 ```
 
-Copy phase — two lines, because a filename plus a full-width bar does not fit in
-80 columns without gutting one of them:
+Copy phase — two lines: an aggregate bar for the whole operation, and a bar for
+the file currently being copied.
 
 ```
-photos/IMG_4471.HEIC
- 62%[===========>       ] 4.21G  118MB/s  eta 22s
+total  62%[===========>      ] 4.21G  118MB/s  eta 22s
+IMG_4471.HEIC  30%[====>          ] 1.4M/4.6M
 ```
+
+The aggregate line owns the rate and ETA. The per-file line shows only its own
+percentage and `done/total` — no second rate or ETA, since an independently
+jittering MB/s figure beside the aggregate one adds motion without information.
 
 The path is shown relative to the source root, middle-ellipsized
-(`photos/…/IMG_4471.HEIC`) when it exceeds the terminal width.
+(`photos/…/IMG_4471.HEIC`) when it exceeds its share of the terminal width.
+
+### Small-file rule
+
+The per-file bar is drawn only for files of **8 MiB or larger**. Below that, the
+second line shows the path alone:
+
+```
+total  81%[==============>   ] 5.4G  118MB/s  eta 8s
+notes/todo.txt
+```
+
+Without this rule, a tree of small files makes the second line strobe: each file
+completes inside a single 1 MiB chunk, so the bar never renders any state between
+0% and 100%, and repainting it at 10 Hz produces noise rather than information.
+The threshold makes the per-file bar appear exactly when it carries signal — the
+large files where the question "how long is *this one* taking?" is worth
+answering — and otherwise degrades the display into a plain current-file line.
+
+The threshold is a compile-time constant, not a flag. It can become one later if
+it proves worth tuning.
 
 Completion summary:
 
@@ -195,6 +219,10 @@ Completion summary:
   scripts.
 - When `--progress=force` is used and stderr is not a TTY, `TIOCGWINSZ` fails and
   the width falls back to 80 columns.
+- Each of the two lines budgets its width independently: fixed-width fields
+  (percentage, counts, rate, ETA) are laid out first and the bar takes the
+  remainder. If the remainder falls below 8 columns, that line drops its bar and
+  shows text only, so narrow terminals degrade rather than wrap.
 - When the plan totals zero bytes (empty files, or only directories), the bar
   renders 100% rather than dividing by zero.
 - Sizes are formatted with a unit scale reaching `T` and `P`, so a multi-terabyte
@@ -234,7 +262,10 @@ Pure functions, no I/O:
 - `cli` parsing: argv → `Options`, including cluster flags, `--`, and rejection of
   unsupported flags.
 - Size and duration formatting.
-- Bar rendering at terminal widths 40, 80, and 200.
+- Bar rendering at terminal widths 40, 80, and 200, covering both lines: the
+  aggregate bar and the per-file bar.
+- The small-file rule: a file below the threshold renders a bare path on the
+  second line, one at or above it renders a bar.
 - EWMA rate estimator against synthetic timing sequences.
 - Byte arithmetic above 2^32: percentage, ETA, and size formatting fed values in
   the 100 GB–10 TB range, asserting no truncation or overflow. This covers the
