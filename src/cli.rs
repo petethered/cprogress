@@ -52,10 +52,10 @@ const UNSUPPORTED_SHORT: &[char] = &['p', 'i', 'n', 'a', 'c', 'l', 's', 'X', 'H'
 pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
     let mut options = Options::default();
     let mut operands: Vec<PathBuf> = Vec::new();
-    let mut iter = args.into_iter();
+    let iter = args.into_iter();
     let mut only_operands = false;
 
-    while let Some(arg) = iter.next() {
+    for arg in iter {
         if only_operands {
             operands.push(PathBuf::from(arg));
             continue;
