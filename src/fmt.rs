@@ -14,12 +14,25 @@ pub fn human_bytes(n: u64) -> String {
         unit += 1;
     }
     let suffix = UNITS[unit];
-    if value < 10.0 {
+
+    // Choose precision based on value, accounting for rounding boundaries.
+    // Thresholds are set so rounding never produces four significant digits or >= 1024.
+    if value < 9.995 {
         format!("{value:.2}{suffix}")
-    } else if value < 100.0 {
+    } else if value < 99.95 {
         format!("{value:.1}{suffix}")
-    } else {
+    } else if value < 1023.5 {
         format!("{value:.0}{suffix}")
+    } else {
+        // Would round to >= 1024, promote to next unit
+        if unit + 1 < UNITS.len() {
+            value /= 1024.0;
+            unit += 1;
+            format!("{value:.2}{}", UNITS[unit])
+        } else {
+            // At max unit (exabytes), just format as is
+            format!("{value:.0}{suffix}")
+        }
     }
 }
 
@@ -126,5 +139,17 @@ mod tests {
         assert_eq!(human_count(999), "999");
         assert_eq!(human_count(41_203), "41,203");
         assert_eq!(human_count(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn boundary_rounding_maintains_three_significant_digits() {
+        // Rounding must not produce four significant digits
+        assert_eq!(human_bytes(10239), "10.0K");
+        assert_eq!(human_bytes(104847051), "100M");
+        assert_eq!(human_bytes(107374182399), "100G");
+
+        // Unit promotion when rounding would exceed 1023
+        assert_eq!(human_bytes(1048575), "1.00M");
+        assert_eq!(human_bytes(1073741823), "1.00G");
     }
 }
