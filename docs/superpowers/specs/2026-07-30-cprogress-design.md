@@ -29,6 +29,33 @@ cprogress [-R|-r] [-f] [-v] [--progress=auto|force|none] src... dest
   and retry.
 - `-v` — print `src -> dest` per file.
 - `--progress` — `auto` (default: bar only when stderr is a TTY), `force`, `none`.
+- `-h` / `--help` — print the full manual. Verified that `cp -h` is an *illegal
+  option* on macOS, so claiming `-h` conflicts with nothing.
+
+### Usage and help output
+
+Invoked with no arguments, `cprogress` prints the same two-line usage `cp` does,
+in the same format and with the same flag list, and exits 64:
+
+```
+usage: cprogress [-R [-H | -L | -P]] [-fi | -n] [-aclpSsvXx] source_file target_file
+       cprogress [-R [-H | -L | -P]] [-fi | -n] [-aclpSsvXx] source_file ... target_directory
+```
+
+The program name is `cprogress` rather than `cp`. `cp` hardcodes its own name even
+when invoked through a differently named symlink, and echoing `cp` from a binary
+called `cprogress` would misdirect anyone debugging a script.
+
+There is a deliberate tension here: the usage line advertises the full `cp` flag
+set while several of those flags are rejected. The usage line states which
+interface is being imitated; `-h` documents the actually supported set, and an
+unsupported flag produces a specific message naming it. Anyone who acts on the
+usage line gets an immediate clear error rather than silent misbehavior.
+
+`-h` / `--help` prints a full manual — the equivalent of `man cp`, written for
+`cprogress`: synopsis, description, every flag, exit status, examples, and the
+explicit list of what is not supported. It goes to stdout and exits 0. The same
+content ships as a roff man page at `man/cprogress.1`.
 - Flag clustering (`-Rf`), the `--` terminator, and BSD trailing-slash behavior
   (a trailing slash on a source directory is ignored, unlike GNU `cp`).
 
@@ -55,10 +82,18 @@ single-threaded.
 Extended attributes and ACLs are not copied. This is documented in the man page
 and `--help`.
 
-Note that excluding `-p` does not mean modes are ignored. As `cp` does without
-`-p`, newly created files and directories take the source's mode bits masked by
-the process umask. What `-p` would add — ownership, timestamps, and BSD file
-flags — is what is absent.
+Note that excluding `-p` does not mean modes are ignored. Matching `cp` without
+`-p`, verified against `/bin/cp` on macOS 26.4:
+
+- A **newly created** file or directory takes the source's mode bits masked by the
+  process umask (source `666` with umask `022` yields `644`; source dir `777`
+  yields `755`).
+- An **existing** destination file keeps its own mode. `cp` does not re-apply the
+  source's mode when overwriting — a `600` destination stays `600` after being
+  copied over from a `666` source.
+
+What `-p` would add — ownership, timestamps, and BSD file flags — is what is
+absent.
 
 ## Approach
 
@@ -243,7 +278,17 @@ next operation:
 cprogress: /path/to/file: Permission denied
 ```
 
-Exit status is 1 if any operation failed, 0 otherwise, 130 on `SIGINT`.
+Exit status matches `cp`, verified against `/bin/cp`:
+
+| Status | Condition |
+| --- | --- |
+| 0 | everything copied |
+| 1 | at least one operation failed |
+| 64 | usage error — bad flag, missing operand (`EX_USAGE`) |
+| 130 | interrupted by `SIGINT` |
+
+Messages match `cp`'s wording where `cp` has an established one, e.g. a directory
+given without `-R` prints `cprogress: s is a directory (not copied).`
 
 The pre-scan changes two things relative to `cp`:
 
@@ -297,6 +342,14 @@ test above.
 
 Dev-dependencies: `tempfile`.
 
-## Installation
+## Distribution
 
-`cargo install --path .`, or copy the release binary onto `PATH`.
+Published to GitHub as an open source project.
+
+- **License:** MIT, in `LICENSE` at the repo root, referenced from `Cargo.toml`.
+- **`man/cprogress.1`:** roff man page carrying the same content as `-h`.
+- **README.md:** what the tool does with a sample of the bar, the supported flag
+  set and the explicitly unsupported one, build-from-source instructions
+  (`cargo build --release`), installation (`cargo install --path .` or copying the
+  release binary onto `PATH`), the `alias cp=cprogress` note, and how to run the
+  tests including the `#[ignore]`-marked large-file test.
