@@ -1,0 +1,16 @@
+[package]
+name = "cprogress"
+version = "0.1.0"
+edition = "2021"
+description = "A macOS cp with a wget-style progress bar"
+license = "MIT"
+repository = "https://github.com/peterazuolas/cprogress"
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
