@@ -215,6 +215,47 @@ fn exit_codes_match_bin_cp() {
 }
 
 #[test]
+fn symlinks_without_recursive_are_followed_like_bin_cp() {
+    // The existing symlink coverage only runs -Rf, where both implementations
+    // preserve links. Without -R, cp dereferences, and we must too.
+    let td = tempfile::tempdir().expect("tempdir");
+    fs::write(td.path().join("f.txt"), b"hello").expect("write");
+    fs::create_dir(td.path().join("dir")).expect("mkdir");
+    symlink("f.txt", td.path().join("to-file")).expect("symlink");
+    symlink("dir", td.path().join("to-dir")).expect("symlink");
+    symlink("nowhere", td.path().join("broken")).expect("symlink");
+
+    for name in ["to-file", "to-dir", "broken"] {
+        let src = td.path().join(name);
+        let ours = td.path().join(format!("ours-{name}"));
+        let theirs = td.path().join(format!("theirs-{name}"));
+
+        let a = Command::new(BIN).arg(&src).arg(&ours).output().expect("run cprogress");
+        let b = Command::new("/bin/cp").arg(&src).arg(&theirs).output().expect("run cp");
+
+        assert_eq!(a.status.code(), b.status.code(), "{name}: exit code differs");
+        assert_eq!(
+            String::from_utf8_lossy(&a.stderr).replace("cprogress: ", "cp: "),
+            String::from_utf8_lossy(&b.stderr),
+            "{name}: stderr differs"
+        );
+
+        let mine = fs::symlink_metadata(&ours).ok().map(|m| m.file_type().is_symlink());
+        let reference = fs::symlink_metadata(&theirs).ok().map(|m| m.file_type().is_symlink());
+        assert_eq!(mine, reference, "{name}: destination kind differs");
+    }
+
+    // Spelled out, so a regression cannot pass by matching cp on nothing:
+    // the followed link is a regular file with the target's contents.
+    let followed = td.path().join("ours-to-file");
+    assert!(
+        !fs::symlink_metadata(&followed).expect("lstat").file_type().is_symlink(),
+        "the link was preserved instead of followed"
+    );
+    assert_eq!(fs::read(&followed).expect("read"), b"hello");
+}
+
+#[test]
 fn an_io_error_reads_exactly_like_cps() {
     // Rust's io::Error Display appends "(os error 13)", which cp never
     // prints; the errno text has to be translated, not borrowed.

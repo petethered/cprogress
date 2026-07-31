@@ -94,8 +94,8 @@ impl Scanner<'_> {
     /// the parent directory of the top-level source this call descends from;
     /// it stays fixed across the recursion so every file's display path is
     /// relative to the same root, however deep it is nested.
-    fn visit(&mut self, src: &Path, dst: &Path, top_level: bool, root_parent: &Path) {
-        let meta = match fs::symlink_metadata(src) {
+    fn visit(&mut self, src: &Path, dst: &Path, root_parent: &Path) {
+        let mut meta = match fs::symlink_metadata(src) {
             Ok(m) => m,
             Err(e) => {
                 self.note_io(src, &e);
@@ -104,15 +104,31 @@ impl Scanner<'_> {
         };
 
         if meta.file_type().is_symlink() {
-            match fs::read_link(src) {
-                Ok(target) => self.plan.ops.push(CopyOp::Symlink {
-                    src: src.to_path_buf(),
-                    target,
-                    dst: dst.to_path_buf(),
-                }),
-                Err(e) => self.note_io(src, &e),
+            if self.opts.recursive {
+                // -R implies -P on BSD: the link itself is recreated, whatever
+                // it points at, at any depth. Verified: `cp -R broken out`
+                // copies a dangling link and exits 0.
+                match fs::read_link(src) {
+                    Ok(target) => self.plan.ops.push(CopyOp::Symlink {
+                        src: src.to_path_buf(),
+                        target,
+                        dst: dst.to_path_buf(),
+                    }),
+                    Err(e) => self.note_io(src, &e),
+                }
+                return;
             }
-            return;
+            // Without -R, cp dereferences. Re-stat through the link and let
+            // the target's own type decide, so a link to a directory reports
+            // "is a directory (not copied)." and a dangling one reports the
+            // ENOENT the stat produced — both exactly as cp does.
+            meta = match fs::metadata(src) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.note_io(src, &e);
+                    return;
+                }
+            };
         }
 
         if meta.is_dir() {
@@ -146,7 +162,7 @@ impl Scanner<'_> {
             // Sorted so a given tree always yields the same plan.
             names.sort();
             for name in names {
-                self.visit(&src.join(&name), &dst.join(&name), false, root_parent);
+                self.visit(&src.join(&name), &dst.join(&name), root_parent);
             }
             return;
         }
@@ -158,7 +174,6 @@ impl Scanner<'_> {
 
         // Sockets, fifos, devices: out of scope, reported rather than skipped
         // silently so the exit status reflects that something was left behind.
-        let _ = top_level;
         self.plan.errors.push(format!(
             "{PROGRAM}: {}: unsupported file type (not copied)",
             src.display()
@@ -214,7 +229,7 @@ pub fn build(
         }
 
         let root_parent = src.parent().unwrap_or(Path::new(""));
-        scanner.visit(src, &target, true, root_parent);
+        scanner.visit(src, &target, root_parent);
     }
 
     Ok(scanner.plan)
@@ -467,6 +482,112 @@ mod tests {
             CopyOp::CopyFile { display, .. } => assert_eq!(display, Path::new("a.txt")),
             other => panic!("wrong op: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_symlink_to_a_file_is_followed_without_recursive() {
+        // Verified against /bin/cp: `cp link out` produces a Regular File and
+        // exits 0. Only -R (which implies -P) preserves the link itself.
+        let td = tempfile::tempdir().expect("tempdir");
+        fs::write(td.path().join("f.txt"), b"hello").expect("write");
+        let link = td.path().join("link");
+        symlink("f.txt", &link).expect("symlink");
+        let dst = td.path().join("out");
+
+        let plan = build_in(std::slice::from_ref(&link), &dst, &opts(false)).expect("plan");
+        assert!(plan.errors.is_empty(), "got errors: {:?}", plan.errors);
+        match &plan.ops[..] {
+            [CopyOp::CopyFile { src, dst: d, size, .. }] => {
+                assert_eq!(src, &link);
+                assert_eq!(d, &dst);
+                // The size comes from the target, not the link itself.
+                assert_eq!(*size, 5);
+            }
+            other => panic!("expected one CopyFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_symlink_to_a_directory_without_recursive_errors_like_cp() {
+        // Verified against /bin/cp: "cp: dlink is a directory (not copied)."
+        // exit 1 — because it stats through the link. We used to create a
+        // symlink and exit 0.
+        let td = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(td.path().join("dir")).expect("mkdir");
+        let link = td.path().join("dlink");
+        symlink("dir", &link).expect("symlink");
+        let dst = td.path().join("out");
+
+        let plan = build_in(std::slice::from_ref(&link), &dst, &opts(false)).expect("plan");
+        assert!(plan.ops.is_empty(), "got ops: {:?}", plan.ops);
+        assert_eq!(
+            plan.errors,
+            vec![format!(
+                "cprogress: {} is a directory (not copied).",
+                link.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_broken_symlink_without_recursive_reports_the_dangling_target() {
+        // Verified against /bin/cp: "cp: broken: No such file or directory",
+        // exit 1 — the stat through the link is what fails.
+        let td = tempfile::tempdir().expect("tempdir");
+        let link = td.path().join("broken");
+        symlink("nowhere", &link).expect("symlink");
+        let dst = td.path().join("out");
+
+        let plan = build_in(std::slice::from_ref(&link), &dst, &opts(false)).expect("plan");
+        assert!(plan.ops.is_empty(), "got ops: {:?}", plan.ops);
+        assert_eq!(
+            plan.errors,
+            vec![format!(
+                "cprogress: {}: No such file or directory",
+                link.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn recursive_still_preserves_every_symlink() {
+        // -R implies -P on BSD: links are recreated, never followed, whatever
+        // they point at — including a broken one, which cp copies happily.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("s");
+        fs::create_dir(src.join("dir").parent().expect("parent")).expect("mkdir s");
+        fs::create_dir(src.join("dir")).expect("mkdir dir");
+        fs::write(src.join("f.txt"), b"hello").expect("write");
+        symlink("f.txt", src.join("to-file")).expect("symlink");
+        symlink("dir", src.join("to-dir")).expect("symlink");
+        symlink("nowhere", src.join("broken")).expect("symlink");
+        let dst = td.path().join("d");
+
+        let plan = build_in(&[src], &dst, &opts(true)).expect("plan");
+        assert!(plan.errors.is_empty(), "got errors: {:?}", plan.errors);
+        for name in ["to-file", "to-dir", "broken"] {
+            assert!(
+                plan.ops
+                    .iter()
+                    .any(|o| matches!(o, CopyOp::Symlink { dst, .. } if dst.ends_with(name))),
+                "{name} was not preserved as a symlink: {:?}",
+                plan.ops
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_to_a_file_at_the_top_of_a_recursive_source_is_preserved() {
+        // A top-level symlink argument under -R is still a link, not a file:
+        // cp -R never dereferences, at any depth.
+        let td = tempfile::tempdir().expect("tempdir");
+        fs::write(td.path().join("f.txt"), b"hello").expect("write");
+        let link = td.path().join("link");
+        symlink("f.txt", &link).expect("symlink");
+        let dst = td.path().join("out");
+
+        let plan = build_in(&[link], &dst, &opts(true)).expect("plan");
+        assert!(matches!(plan.ops[..], [CopyOp::Symlink { .. }]), "{:?}", plan.ops);
     }
 
     #[test]

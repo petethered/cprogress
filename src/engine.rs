@@ -599,7 +599,11 @@ mod tests {
         // creating that entry needs write permission on `d`.
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).expect("chmod");
 
+        // -R is required to get a Symlink op at all: without it the scan
+        // dereferences the link, as cp does, and this dangling one would be
+        // reported as a missing source instead.
         let verbose = Options {
+            recursive: true,
             verbose: true,
             ..Options::default()
         };
