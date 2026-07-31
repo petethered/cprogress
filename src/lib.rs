@@ -2,6 +2,7 @@ pub mod cli;
 pub mod engine;
 pub mod fmt;
 pub mod help;
+pub mod msg;
 pub mod plan;
 pub mod progress;
 pub mod rate;

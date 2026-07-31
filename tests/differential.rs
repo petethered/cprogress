@@ -215,6 +215,41 @@ fn exit_codes_match_bin_cp() {
 }
 
 #[test]
+fn an_io_error_reads_exactly_like_cps() {
+    // Rust's io::Error Display appends "(os error 13)", which cp never
+    // prints; the errno text has to be translated, not borrowed.
+    let td = tempfile::tempdir().expect("tempdir");
+    let src = td.path().join("secret.txt");
+    fs::write(&src, b"nope").expect("write");
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let ours = Command::new(BIN)
+        .arg(&src)
+        .arg(td.path().join("ours"))
+        .output()
+        .expect("run cprogress");
+    let theirs = Command::new("/bin/cp")
+        .arg(&src)
+        .arg(td.path().join("theirs"))
+        .output()
+        .expect("run cp");
+
+    let mine = String::from_utf8_lossy(&ours.stderr).replace("cprogress: ", "cp: ");
+    let reference = String::from_utf8_lossy(&theirs.stderr).into_owned();
+
+    assert_eq!(mine, reference, "error text differs from cp");
+    assert!(
+        reference.contains("Permission denied"),
+        "test assumption broken, cp said: {reference:?}"
+    );
+    assert!(
+        !mine.contains("os error"),
+        "the raw errno leaked into the message: {mine:?}"
+    );
+    assert_eq!(ours.status.code(), theirs.status.code());
+}
+
+#[test]
 fn bare_invocation_prints_cps_usage_on_stderr() {
     let ours = Command::new(BIN).output().expect("run");
     let theirs = Command::new("/bin/cp").output().expect("run");

@@ -1,4 +1,5 @@
 use crate::cli::Options;
+use crate::msg::{self, PROGRAM};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -37,7 +38,7 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::DestNotDirectory(p) => {
-                write!(f, "cprogress: {}: Not a directory", p.display())
+                write!(f, "{PROGRAM}: {}: Not a directory", p.display())
             }
         }
     }
@@ -78,9 +79,7 @@ struct Scanner<'a> {
 
 impl Scanner<'_> {
     fn note_io(&mut self, path: &Path, err: &io::Error) {
-        self.plan
-            .errors
-            .push(format!("cprogress: {}: {}", path.display(), err));
+        self.plan.errors.push(msg::io_error(path, err));
     }
 
     fn add_file(&mut self, src: PathBuf, dst: PathBuf, size: u64, root_parent: &Path) {
@@ -120,7 +119,7 @@ impl Scanner<'_> {
             if !self.opts.recursive {
                 // Matches cp's wording.
                 self.plan.errors.push(format!(
-                    "cprogress: {} is a directory (not copied).",
+                    "{PROGRAM}: {} is a directory (not copied).",
                     src.display()
                 ));
                 return;
@@ -161,7 +160,7 @@ impl Scanner<'_> {
         // silently so the exit status reflects that something was left behind.
         let _ = top_level;
         self.plan.errors.push(format!(
-            "cprogress: {}: unsupported file type (not copied)",
+            "{PROGRAM}: {}: unsupported file type (not copied)",
             src.display()
         ));
     }
@@ -207,7 +206,7 @@ pub fn build(
         // the run continues with the rest.
         if same_file(src, &target) {
             scanner.plan.errors.push(format!(
-                "cprogress: {} and {} are identical (not copied).",
+                "{PROGRAM}: {} and {} are identical (not copied).",
                 src.display(),
                 target.display()
             ));

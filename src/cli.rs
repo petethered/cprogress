@@ -1,4 +1,5 @@
 use crate::help::USAGE;
+use crate::msg::PROGRAM;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -35,19 +36,26 @@ pub struct Invocation {
     pub dest: PathBuf,
 }
 
+/// Both flag variants carry the bare option character, without its leading
+/// dash, because that is the unit `cp`'s own messages are built from:
+/// "illegal option -- z".
 #[derive(Debug)]
 pub enum CliError {
     /// A real `cp` flag that v1 deliberately does not implement.
-    Unsupported(String),
-    UnknownFlag(String),
+    Unsupported(char),
+    UnknownFlag(char),
     MissingOperand,
     Help,
 }
 
 /// `cp` flags that exist but are out of scope for v1. Failing loudly on these
 /// beats silently ignoring them: an ignored `-p` yields a tree with wrong
-/// ownership and no indication anything went wrong.
-const UNSUPPORTED_SHORT: &[char] = &['p', 'i', 'n', 'a', 'c', 'l', 's', 'X', 'H', 'L', 'P'];
+/// ownership and no indication anything went wrong. Every documented BSD `cp`
+/// option we do not implement belongs here, so none of them ever falls through
+/// to the "illegal option" path a genuinely unknown letter gets.
+const UNSUPPORTED_SHORT: &[char] = &[
+    'p', 'i', 'n', 'a', 'c', 'l', 's', 'X', 'H', 'L', 'P', 'N', 'S', 'x',
+];
 
 pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
     let mut options = Options::default();
@@ -84,7 +92,10 @@ pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
                 Some("auto") => options.progress = ProgressMode::Auto,
                 Some("force") => options.progress = ProgressMode::Force,
                 Some("none") => options.progress = ProgressMode::None,
-                _ => return Err(CliError::UnknownFlag(text)),
+                // `cp` has no long options at all, so its getopt reads the
+                // second dash as the option character: `cp --bogus` reports
+                // "illegal option -- -". Ours says the same.
+                _ => return Err(CliError::UnknownFlag('-')),
             }
             continue;
         }
@@ -96,10 +107,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
                 'v' => options.verbose = true,
                 // Free to claim: `cp -h` is an illegal option, not a flag.
                 'h' => return Err(CliError::Help),
-                _ if UNSUPPORTED_SHORT.contains(&c) => {
-                    return Err(CliError::Unsupported(format!("-{c}")))
-                }
-                _ => return Err(CliError::UnknownFlag(format!("-{c}"))),
+                _ if UNSUPPORTED_SHORT.contains(&c) => return Err(CliError::Unsupported(c)),
+                _ => return Err(CliError::UnknownFlag(c)),
             }
         }
     }
@@ -108,7 +117,9 @@ pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
         return Err(CliError::MissingOperand);
     }
 
-    let dest = operands.pop().expect("length checked above");
+    let Some(dest) = operands.pop() else {
+        return Err(CliError::MissingOperand);
+    };
     Ok(Invocation {
         options,
         sources: operands,
@@ -119,12 +130,12 @@ pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CliError::Unsupported(flag) => write!(
-                f,
-                "cprogress: {flag} is not supported\n{USAGE}"
-            ),
-            CliError::UnknownFlag(flag) => {
-                write!(f, "cprogress: illegal option {flag}\n{USAGE}")
+            CliError::Unsupported(c) => {
+                write!(f, "{PROGRAM}: -{c} is not supported\n{USAGE}")
+            }
+            // Verbatim `cp`: "/bin/cp: illegal option -- z".
+            CliError::UnknownFlag(c) => {
+                write!(f, "{PROGRAM}: illegal option -- {c}\n{USAGE}")
             }
             // Matches cp: a bare invocation prints usage and nothing else.
             CliError::MissingOperand => write!(f, "{USAGE}"),
@@ -213,12 +224,60 @@ mod tests {
     #[test]
     fn known_cp_flags_we_do_not_support_are_named_in_the_error() {
         match parse_err(&["-p", "a", "b"]) {
-            CliError::Unsupported(f) => assert_eq!(f, "-p"),
+            CliError::Unsupported(c) => assert_eq!(c, 'p'),
             other => panic!("wrong error: {other:?}"),
         }
         assert!(matches!(parse_err(&["-i", "a", "b"]), CliError::Unsupported(_)));
         assert!(matches!(parse_err(&["-n", "a", "b"]), CliError::Unsupported(_)));
         assert!(matches!(parse_err(&["-a", "a", "b"]), CliError::Unsupported(_)));
+    }
+
+    #[test]
+    fn every_documented_cp_option_we_lack_is_unsupported_not_illegal() {
+        // From `man cp` on macOS: the full option set is -H -L -P -R -f -i -l
+        // -n -p -s -v -X -a -c -x -N -S. Whatever we do not implement must
+        // report "is not supported", never "illegal option" — the latter is
+        // for letters cp itself would reject. -N, -S and -x were missing.
+        for c in ['H', 'L', 'P', 'f', 'i', 'l', 'n', 'p', 's', 'X', 'a', 'c', 'x', 'N', 'S'] {
+            if matches!(c, 'f') {
+                continue; // implemented
+            }
+            let flag = format!("-{c}");
+            match parse(vec![OsString::from(&flag), "a".into(), "b".into()]) {
+                Err(CliError::Unsupported(got)) => assert_eq!(got, c),
+                other => panic!("-{c} should be Unsupported, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn illegal_option_text_matches_cp_exactly() {
+        // /bin/cp -z a b  ->  "/bin/cp: illegal option -- z"
+        let text = parse_err(&["-z", "a", "b"]).to_string();
+        assert_eq!(
+            text.lines().next(),
+            Some("cprogress: illegal option -- z"),
+            "got {text:?}"
+        );
+        // /bin/cp --bogus a b  ->  "/bin/cp: illegal option -- -"
+        let text = parse_err(&["--bogus", "a", "b"]).to_string();
+        assert_eq!(
+            text.lines().next(),
+            Some("cprogress: illegal option -- -"),
+            "got {text:?}"
+        );
+        // The usage block follows the diagnostic, as cp's does.
+        assert!(text.ends_with(USAGE), "usage missing: {text:?}");
+    }
+
+    #[test]
+    fn unsupported_option_text_names_the_flag() {
+        let text = parse_err(&["-p", "a", "b"]).to_string();
+        assert_eq!(
+            text.lines().next(),
+            Some("cprogress: -p is not supported"),
+            "got {text:?}"
+        );
     }
 
     #[test]

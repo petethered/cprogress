@@ -1,4 +1,5 @@
 use crate::cli::Options;
+use crate::msg;
 use crate::plan::{CopyOp, Plan};
 use crate::progress::Progress;
 use std::fs::{self, File, OpenOptions};
@@ -37,8 +38,7 @@ struct Runner<'a> {
 
 impl Runner<'_> {
     fn fail(&mut self, path: &Path, err: &std::io::Error) {
-        self.progress
-            .note(&format!("cprogress: {}: {}", path.display(), err));
+        self.progress.note(&msg::io_error(path, err));
         self.outcome.failed = true;
     }
 
