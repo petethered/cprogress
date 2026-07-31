@@ -226,10 +226,13 @@ pub fn build(
         // on `same_file`). Skip this source without emitting any op for it;
         // the run continues with the rest.
         if same_file(src, &target) {
+            // Destination first, then source — the order `cp` uses. Verified:
+            // with hard.txt a hard link to a.txt, `cp a.txt hard.txt` says
+            // "cp: hard.txt and a.txt are identical (not copied)."
             scanner.plan.errors.push(format!(
                 "{PROGRAM}: {} and {} are identical (not copied).",
-                src.display(),
-                target.display()
+                target.display(),
+                src.display()
             ));
             continue;
         }
@@ -431,13 +434,19 @@ mod tests {
         let link = td.path().join("link.txt");
         fs::hard_link(&a, &link).expect("hard_link");
 
-        let plan = build_in(&[a], &link, &opts(false)).expect("plan");
+        let plan = build_in(std::slice::from_ref(&a), &link, &opts(false)).expect("plan");
         assert!(plan.ops.is_empty());
-        assert_eq!(plan.errors.len(), 1);
-        assert!(
-            plan.errors[0].contains("identical (not copied)"),
-            "got {:?}",
-            plan.errors[0]
+        // The exact text, not just a substring: cp names the *destination*
+        // first. Verified: `cp a.txt hard.txt` (hard.txt a hard link to
+        // a.txt) prints "cp: hard.txt and a.txt are identical (not copied)."
+        // Asserting only `contains` is what let the reversed order survive.
+        assert_eq!(
+            plan.errors,
+            vec![format!(
+                "cprogress: {} and {} are identical (not copied).",
+                link.display(),
+                a.display()
+            )]
         );
     }
 

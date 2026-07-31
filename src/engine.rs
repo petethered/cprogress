@@ -40,6 +40,11 @@ struct Runner<'a> {
     /// instead of restating the same cause once per descendant — which on a
     /// large tree would bury the real failure under thousands of ENOENTs.
     failed_dirs: Vec<PathBuf>,
+    /// Directories we created, with the mode they must end up with. `cp`
+    /// creates each directory with `mode | S_IRWXU` and applies the real mode
+    /// only after populating it, so a read-only source directory still
+    /// receives its own contents. Applied after the run, deepest first.
+    pending_modes: Vec<(PathBuf, u32)>,
 }
 
 impl Runner<'_> {
@@ -74,17 +79,37 @@ impl Runner<'_> {
     fn create_dir(&mut self, dst: &Path, mode: u32) -> bool {
         match fs::create_dir(dst) {
             Ok(()) => {
-                // Only newly created directories take the source mode. A
-                // failure here is soft — the directory itself exists — so it
-                // still counts as created, matching copy_file's own handling
-                // of a post-copy mode-setting failure.
-                let perms = fs::Permissions::from_mode(mode & !self.mask);
+                // Only newly created directories take the source mode, and not
+                // yet: it is deferred until after the tree is populated (see
+                // `pending_modes`), because a source mode without write or
+                // search permission would otherwise lock out its own children.
+                // Until then the directory is owner-accessible, as cp's is.
+                let final_mode = mode & !self.mask;
+                let perms = fs::Permissions::from_mode(final_mode | 0o700);
                 if let Err(e) = fs::set_permissions(dst, perms) {
+                    // Soft: the directory itself exists, so this still counts
+                    // as created, matching copy_file's handling of a post-copy
+                    // mode failure.
                     self.fail(dst, &e);
                 }
+                self.pending_modes.push((dst.to_path_buf(), final_mode));
                 true
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => true,
+            // EEXIST says something is already there, not that it is a
+            // directory. When it is a file, cp reports ENOTDIR once against
+            // the directory itself and abandons the descent; treating EEXIST
+            // as success let every child fail separately with a message that
+            // never named the cause. `is_dir` follows symlinks, so a link to
+            // a directory still counts as usable — writing through it works.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                if dst.is_dir() {
+                    return true;
+                }
+                let not_a_dir = std::io::Error::from_raw_os_error(libc::ENOTDIR);
+                self.fail(dst, &not_a_dir);
+                self.failed_dirs.push(dst.to_path_buf());
+                false
+            }
             Err(e) => {
                 self.fail(dst, &e);
                 // Nothing below this can succeed, and cp would never have
@@ -150,6 +175,18 @@ impl Runner<'_> {
                 }
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Apply the deferred directory modes, deepest first. Order matters: a
+    /// parent tightened to a mode without search permission would block the
+    /// traversal needed to reach its own children.
+    fn apply_pending_modes(&mut self) {
+        for (dst, mode) in std::mem::take(&mut self.pending_modes).into_iter().rev() {
+            let perms = fs::Permissions::from_mode(mode);
+            if let Err(e) = fs::set_permissions(&dst, perms) {
+                self.fail(&dst, &e);
+            }
         }
     }
 
@@ -245,6 +282,7 @@ pub fn run(
         mask: umask(),
         outcome: Outcome::default(),
         failed_dirs: Vec::new(),
+        pending_modes: Vec::new(),
     };
 
     for op in &plan.ops {
@@ -284,6 +322,10 @@ pub fn run(
             }
         }
     }
+
+    // Runs even after an interrupt: a directory left at the widened mode would
+    // be more permissive than the source it came from.
+    runner.apply_pending_modes();
 
     runner.outcome
 }
@@ -548,6 +590,74 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_source_directory_still_gets_its_contents() {
+        // Verified against /bin/cp: `cp -R s d` where s/ro is mode 0555 copies
+        // s/ro/f.txt and leaves d/ro at 0555. cp creates each directory with
+        // mode|S_IRWXU and applies the real mode after populating it. Applying
+        // the source mode immediately makes the directory unwritable before
+        // its own children are copied, losing them.
+        // Not root: root ignores the write-permission bit entirely.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("s");
+        fs::create_dir_all(src.join("ro/nested")).expect("mkdir");
+        fs::write(src.join("ro/f.txt"), b"data").expect("write");
+        fs::write(src.join("ro/nested/g.txt"), b"deep").expect("write");
+        fs::set_permissions(src.join("ro/nested"), fs::Permissions::from_mode(0o555))
+            .expect("chmod nested");
+        fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o555)).expect("chmod ro");
+        let dst = td.path().join("d");
+
+        let p = plan_for(std::slice::from_ref(&src), &dst, &recursive());
+        let (spy, outcome) = spy_run(&p, &recursive());
+
+        assert!(!outcome.failed, "unexpected failure: {:?}", spy.notes);
+        assert_eq!(fs::read(dst.join("ro/f.txt")).expect("read"), b"data");
+        assert_eq!(fs::read(dst.join("ro/nested/g.txt")).expect("read"), b"deep");
+        // The restrictive mode is still applied, just after populating.
+        let mode = fs::metadata(dst.join("ro")).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555 & !umask(), "got {mode:o}");
+        let nested = fs::metadata(dst.join("ro/nested")).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(nested, 0o555 & !umask(), "got {nested:o}");
+
+        // Let tempfile clean up.
+        for p in [dst.join("ro/nested"), dst.join("ro"), src.join("ro/nested"), src.join("ro")] {
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("restore");
+        }
+    }
+
+    #[test]
+    fn a_destination_that_exists_as_a_file_reports_once_and_prunes() {
+        // Verified against /bin/cp: with a regular file at dest/a,
+        // `cp -R s/a dest` prints one line, "cp: dest/a: Not a directory".
+        // mkdir returns EEXIST for *anything* already at the path, so
+        // treating EEXIST as "the directory is there" let every child fail
+        // separately with a message that never named the cause.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("a");
+        fs::create_dir_all(src.join("deep")).expect("mkdir");
+        fs::write(src.join("f"), b"1").expect("write");
+        fs::write(src.join("g"), b"2").expect("write");
+        fs::write(src.join("deep/h"), b"3").expect("write");
+        let dst = td.path().join("dest");
+        fs::create_dir(&dst).expect("mkdir");
+        fs::write(dst.join("a"), b"blocker").expect("write");
+
+        let p = plan_for(&[src], &dst, &recursive());
+        let total = p.total_bytes;
+        let (spy, outcome) = spy_run(&p, &recursive());
+
+        assert!(outcome.failed);
+        assert_eq!(
+            spy.notes,
+            vec![format!("cprogress: {}: Not a directory", dst.join("a").display())],
+            "expected exactly one error naming the cause"
+        );
+        assert_eq!(spy.advanced, total, "aggregate did not reach the total");
+        // The blocker is left exactly as it was.
+        assert_eq!(fs::read(dst.join("a")).expect("read"), b"blocker");
+    }
+
+    #[test]
     fn a_pruned_subtree_reports_no_symlinks_and_no_verbose_lines() {
         // Symlinks under a failed directory take the same skip as files, but
         // get no byte compensation (they carry none). Nothing under a failed
@@ -598,19 +708,20 @@ mod tests {
 
         let p = plan_for(&[a, ab], &dst, &recursive());
         // Make only `dest/a` fail, by putting a file where its directory goes.
+        // This must genuinely populate `failed_dirs` for the test to mean
+        // anything — see a_destination_that_exists_as_a_file_reports_once.
         fs::write(dst.join("a"), b"blocker").expect("write");
 
         let (spy, outcome) = spy_run(&p, &recursive());
 
         assert!(outcome.failed);
+        // Exactly one error proves the prune fired; a naive string-prefix
+        // comparison in under_failed_dir would additionally swallow dest/ab
+        // and fail the read below.
+        assert_eq!(spy.notes.len(), 1, "expected one error, got {:?}", spy.notes);
         assert_eq!(
             fs::read(dst.join("ab/g")).expect("sibling should have been copied"),
             b"2"
-        );
-        assert!(
-            spy.notes.iter().all(|n| !n.contains("ab")),
-            "the sibling was pruned: {:?}",
-            spy.notes
         );
     }
 
@@ -798,6 +909,7 @@ mod tests {
             mask: umask(),
             outcome: Outcome::default(),
             failed_dirs: Vec::new(),
+            pending_modes: Vec::new(),
         };
 
         let result = runner.open_dest(&dst);

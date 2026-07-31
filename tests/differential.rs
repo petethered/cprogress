@@ -324,6 +324,100 @@ fn symlinks_without_recursive_are_followed_like_bin_cp() {
 }
 
 #[test]
+fn copying_a_file_onto_itself_reads_exactly_like_bin_cp() {
+    // cp names the destination first. A hard link is what makes the order
+    // observable: with both operands spelled the same it is invisible.
+    let td = tempfile::tempdir().expect("tempdir");
+    let a = td.path().join("a.txt");
+    fs::write(&a, b"x").expect("write");
+    let hard = td.path().join("hard.txt");
+    fs::hard_link(&a, &hard).expect("hard_link");
+
+    let ours = Command::new(BIN).arg(&a).arg(&hard).output().expect("run");
+    let theirs = Command::new("/bin/cp").arg(&a).arg(&hard).output().expect("run");
+
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stderr).replace("cprogress: ", "cp: "),
+        String::from_utf8_lossy(&theirs.stderr),
+        "operand order or wording differs from cp"
+    );
+    assert_eq!(ours.status.code(), theirs.status.code());
+}
+
+#[test]
+fn a_read_only_source_directory_keeps_its_contents_like_bin_cp() {
+    // cp creates each directory with mode|S_IRWXU and applies the real mode
+    // after populating it. Applying the source mode up front locks the
+    // directory before its own children are copied — silent data loss.
+    let td = tempfile::tempdir().expect("tempdir");
+    let src = td.path().join("src");
+    fs::create_dir_all(src.join("ro/deeper")).expect("mkdir");
+    fs::write(src.join("ro/f.txt"), b"kept").expect("write");
+    fs::write(src.join("ro/deeper/g.txt"), b"also kept").expect("write");
+    fs::set_permissions(src.join("ro/deeper"), fs::Permissions::from_mode(0o555)).expect("chmod");
+    fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o555)).expect("chmod");
+
+    let ours = td.path().join("ours");
+    let theirs = td.path().join("theirs");
+    let a = Command::new(BIN).args(["-R"]).arg(&src).arg(&ours).output().expect("run");
+    let b = Command::new("/bin/cp").args(["-R"]).arg(&src).arg(&theirs).output().expect("run");
+
+    assert_eq!(a.status.code(), b.status.code(), "exit code differs");
+    assert_eq!(describe(&ours), describe(&theirs), "tree structure or modes differ");
+    assert_eq!(contents(&ours), contents(&theirs), "file contents differ");
+    assert!(
+        b.stderr.is_empty(),
+        "test assumption broken: cp complained: {:?}",
+        String::from_utf8_lossy(&b.stderr)
+    );
+
+    // Restore so tempfile can clean up.
+    for p in [
+        src.join("ro/deeper"), src.join("ro"),
+        ours.join("ro/deeper"), ours.join("ro"),
+        theirs.join("ro/deeper"), theirs.join("ro"),
+    ] {
+        let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn a_destination_blocked_by_a_file_reports_like_bin_cp() {
+    // mkdir returns EEXIST for anything already at the path. cp reports
+    // ENOTDIR once, against the directory itself, and abandons the descent.
+    let td = tempfile::tempdir().expect("tempdir");
+    let src = td.path().join("a");
+    fs::create_dir_all(src.join("deep")).expect("mkdir");
+    fs::write(src.join("f"), b"1").expect("write");
+    fs::write(src.join("g"), b"2").expect("write");
+    fs::write(src.join("deep/h"), b"3").expect("write");
+
+    let ours = td.path().join("ours");
+    let theirs = td.path().join("theirs");
+    for d in [&ours, &theirs] {
+        fs::create_dir(d).expect("mkdir");
+        fs::write(d.join("a"), b"blocker").expect("write");
+    }
+
+    let a = Command::new(BIN).args(["-R"]).arg(&src).arg(&ours).output().expect("run");
+    let b = Command::new("/bin/cp").args(["-R"]).arg(&src).arg(&theirs).output().expect("run");
+
+    // The two runs use different destination directories, so normalise those
+    // names away before comparing; everything else must be identical.
+    let mine = String::from_utf8_lossy(&a.stderr)
+        .replace("cprogress: ", "cp: ")
+        .replace("/ours/", "/DEST/");
+    let reference = String::from_utf8_lossy(&b.stderr).replace("/theirs/", "/DEST/");
+    assert_eq!(mine, reference, "error text differs from cp");
+    assert_eq!(a.status.code(), b.status.code());
+    assert_eq!(
+        reference.lines().count(),
+        1,
+        "test assumption broken: cp said {reference:?}"
+    );
+}
+
+#[test]
 fn an_io_error_reads_exactly_like_cps() {
     // Rust's io::Error Display appends "(os error 13)", which cp never
     // prints; the errno text has to be translated, not borrowed.
