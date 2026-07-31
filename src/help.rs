@@ -38,10 +38,17 @@ DESCRIPTION
              recreated as symbolic links rather than followed, matching the
              default behavior of cp -R.
 
+             Without -R, a symbolic link is followed and whatever it points at
+             is copied, which is also what cp does. A link to a directory is
+             therefore reported as a directory, and a dangling link as a
+             missing file.
+
      -f      If a destination file cannot be opened for writing, remove it and
              try again.
 
-     -v      Print the name of each file as it is copied.
+     -v      Print the name of each file as it is copied, as "source -> dest",
+             on standard output. Errors go to standard error. cp splits them
+             the same way, so redirecting either stream behaves identically.
 
      -h      Print this manual and exit.
 
@@ -56,9 +63,16 @@ UNSUPPORTED OPTIONS
      The following cp(1) options are not implemented and are rejected with an
      error rather than ignored, so that a script relying on one fails visibly:
 
-           -p -i -n -a -c -l -s -X -H -L -P
+           -p -i -n -a -c -l -s -X -H -L -P -N -S -x
 
      Extended attributes and access control lists are not copied.
+
+UNSUPPORTED FILE TYPES
+     Only regular files, directories, and symbolic links are copied. A socket,
+     FIFO, or device node is reported as an unsupported file type and skipped;
+     the rest of the tree is still copied, and the exit status is 1. cp -R
+     recreates these, so a tree containing one is a case where cprogress and
+     cp differ.
 
 FILE PERMISSIONS
      A newly created file or directory takes the source's permission bits
@@ -114,6 +128,42 @@ mod tests {
             "-R", "-f", "-v", "--progress", "-p", "alias cp=cprogress",
         ] {
             assert!(MANUAL.contains(expected), "manual missing {expected:?}");
+        }
+    }
+
+    /// A user can read three things: `-h`, the man page, and the README. The
+    /// review found all three drifting apart — the README was missing the
+    /// ownership sentence the other two carried, and none of them mentioned
+    /// the special-file limitation. Each is asserted in all three here so the
+    /// next omission fails a test rather than reaching a user.
+    #[test]
+    fn every_doc_surface_carries_the_same_limitations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let man = std::fs::read_to_string(root.join("man/cprogress.1")).expect("man page");
+        let readme = std::fs::read_to_string(root.join("README.md")).expect("README");
+        let surfaces = [("MANUAL", MANUAL), ("man page", man.as_str()), ("README", readme.as_str())];
+
+        for (name, text) in surfaces {
+            // The options this pass added to UNSUPPORTED_SHORT. The man page
+            // spells them "Fl N"; the other two use a bare "-N".
+            for flag in ['N', 'S', 'x'] {
+                assert!(
+                    text.contains(&format!("-{flag}")) || text.contains(&format!("Fl {flag}")),
+                    "{name} does not list -{flag} among the unsupported options"
+                );
+            }
+            // Sockets, FIFOs and device nodes are rejected where cp -R
+            // recreates them; an undocumented exit 1 is a nasty surprise.
+            for word in ["socket", "FIFO", "device node"] {
+                assert!(
+                    text.to_lowercase().contains(&word.to_lowercase()),
+                    "{name} does not document the {word} limitation"
+                );
+            }
+            assert!(
+                text.contains("Ownership") || text.contains("ownership"),
+                "{name} does not say ownership is not preserved"
+            );
         }
     }
 }

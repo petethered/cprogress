@@ -51,9 +51,9 @@ cprogress [-R | -r] [-f] [-v] [--progress=auto|force|none] source ... target
 
 | Flag | Meaning |
 | --- | --- |
-| `-R`, `-r` | Copy directories recursively. Symlinks are recreated, not followed. |
+| `-R`, `-r` | Copy directories recursively. Symlinks are recreated, not followed. Without `-R` a symlink is followed and its target copied, as `cp` does. |
 | `-f` | If the destination cannot be opened for writing, remove it and retry. |
-| `-v` | Print each file as it is copied. |
+| `-v` | Print each file as it is copied, on stdout. Errors go to stderr, as with `cp`. |
 | `-h`, `--help` | Print the full manual. |
 | `--progress` | `auto` (default) shows the bar only on a terminal; `force` always; `none` never. |
 
@@ -73,12 +73,21 @@ Scripts see exactly what `cp` would print.
 
 ## Not supported
 
-`-p`, `-i`, `-n`, `-a`, `-c`, `-l`, `-s`, `-X`, `-H`, `-L`, `-P`. These fail with
-a message rather than being silently ignored, so a script that relies on one
-finds out immediately. Extended attributes and ACLs are not copied.
+`-p`, `-i`, `-n`, `-a`, `-c`, `-l`, `-s`, `-X`, `-H`, `-L`, `-P`, `-N`, `-S`,
+`-x`. These fail with a message rather than being silently ignored, so a script
+that relies on one finds out immediately. Extended attributes and ACLs are not
+copied.
+
+Only regular files, directories, and symlinks are copied. A socket, FIFO, or
+device node is reported as an unsupported file type and skipped — the rest of
+the tree still copies, and the exit status is 1. `cp -R` recreates these, so a
+tree containing one is the one case where the two tools differ in what lands.
 
 New files and directories take the source's permissions masked by your umask,
 and an existing destination file keeps its own permissions — both matching `cp`.
+
+Ownership, timestamps, and BSD file flags are not preserved; that is what
+`cp -p` would provide, and `-p` is not supported.
 
 ## How it works
 

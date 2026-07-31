@@ -251,6 +251,26 @@ mod tests {
     }
 
     #[test]
+    fn the_manual_lists_exactly_the_unsupported_flags() {
+        // The constant and the documentation drifted apart once already; this
+        // catches drift in both directions.
+        let line = crate::help::MANUAL
+            .lines()
+            .find(|l| l.trim_start().starts_with("-p -i -n"))
+            .expect("the manual's unsupported-options list");
+        let listed: Vec<&str> = line.split_whitespace().collect();
+        for c in UNSUPPORTED_SHORT {
+            let flag = format!("-{c}");
+            assert!(listed.contains(&flag.as_str()), "the manual omits {flag}");
+        }
+        assert_eq!(
+            listed.len(),
+            UNSUPPORTED_SHORT.len(),
+            "the manual lists options we do accept: {listed:?}"
+        );
+    }
+
+    #[test]
     fn illegal_option_text_matches_cp_exactly() {
         // /bin/cp -z a b  ->  "/bin/cp: illegal option -- z"
         let text = parse_err(&["-z", "a", "b"]).to_string();
