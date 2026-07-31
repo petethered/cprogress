@@ -53,7 +53,7 @@ cprogress [-R | -r] [-f] [-v] [--progress=auto|force|none] source ... target
 | --- | --- |
 | `-R`, `-r` | Copy directories recursively. Symlinks are recreated, not followed. Without `-R` a symlink is followed and its target copied, as `cp` does. |
 | `-f` | If the destination cannot be opened for writing, remove it and retry. |
-| `-v` | Print each file as it is copied, on stdout. Errors go to stderr, as with `cp`. |
+| `-v` | Print each file as it is copied, as `source -> dest`, on stdout. Errors go to stderr, as with `cp`. |
 | `-h`, `--help` | Print the full manual. |
 | `--progress` | `auto` (default) shows the bar only on a terminal; `force` always; `none` never. |
 
@@ -69,7 +69,8 @@ Because the bar is suppressed when stderr is not a terminal, this is safe:
 alias cp=cprogress
 ```
 
-Scripts see exactly what `cp` would print.
+Diagnostics and `-v` lines use the same streams and wording `cp` uses, so a
+script sees what it expects — with the exceptions in "Not supported" above.
 
 ## Not supported
 
@@ -80,8 +81,14 @@ copied.
 
 Only regular files, directories, and symlinks are copied. A socket, FIFO, or
 device node is reported as an unsupported file type and skipped — the rest of
-the tree still copies, and the exit status is 1. `cp -R` recreates these, so a
-tree containing one is the one case where the two tools differ in what lands.
+the tree still copies, and the exit status is 1.
+
+`cp` differs in both directions. Under `-R` it recreates FIFOs and device
+nodes. Without `-R` it opens the source and copies whatever bytes it yields, so
+`cp /dev/null file` truncates `file` where `cprogress` reports an error
+instead. `cp` skips sockets just as `cprogress` does, but it exits 0 in all of
+these cases; `cprogress` exits 1, deliberately, because it leaves more behind
+than `cp` does.
 
 New files and directories take the source's permissions masked by your umask,
 and an existing destination file keeps its own permissions — both matching `cp`.

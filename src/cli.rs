@@ -53,7 +53,7 @@ pub enum CliError {
 /// ownership and no indication anything went wrong. Every documented BSD `cp`
 /// option we do not implement belongs here, so none of them ever falls through
 /// to the "illegal option" path a genuinely unknown letter gets.
-const UNSUPPORTED_SHORT: &[char] = &[
+pub(crate) const UNSUPPORTED_SHORT: &[char] = &[
     'p', 'i', 'n', 'a', 'c', 'l', 's', 'X', 'H', 'L', 'P', 'N', 'S', 'x',
 ];
 
@@ -117,6 +117,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Invocation, CliError> {
         return Err(CliError::MissingOperand);
     }
 
+    // Unreachable — the length check above guarantees a last element. Written
+    // as a `let ... else` rather than `expect` to keep the no-panic rule.
     let Some(dest) = operands.pop() else {
         return Err(CliError::MissingOperand);
     };
@@ -234,13 +236,17 @@ mod tests {
 
     #[test]
     fn every_documented_cp_option_we_lack_is_unsupported_not_illegal() {
-        // From `man cp` on macOS: the full option set is -H -L -P -R -f -i -l
-        // -n -p -s -v -X -a -c -x -N -S. Whatever we do not implement must
-        // report "is not supported", never "illegal option" — the latter is
-        // for letters cp itself would reject. -N, -S and -x were missing.
-        for c in ['H', 'L', 'P', 'f', 'i', 'l', 'n', 'p', 's', 'X', 'a', 'c', 'x', 'N', 'S'] {
-            if matches!(c, 'f') {
-                continue; // implemented
+        // The full documented BSD option set, from `man cp` on macOS. Every
+        // one we do not implement must report "is not supported", never
+        // "illegal option" — the latter is for letters cp itself would
+        // reject. -N, -S and -x were missing from UNSUPPORTED_SHORT.
+        const ALL: &[char] = &[
+            'H', 'L', 'P', 'R', 'f', 'i', 'l', 'n', 'p', 's', 'v', 'X', 'a', 'c', 'x', 'N', 'S',
+        ];
+        const IMPLEMENTED: &[char] = &['R', 'f', 'v'];
+        for &c in ALL {
+            if IMPLEMENTED.contains(&c) {
+                continue;
             }
             let flag = format!("-{c}");
             match parse(vec![OsString::from(&flag), "a".into(), "b".into()]) {

@@ -70,9 +70,14 @@ UNSUPPORTED OPTIONS
 UNSUPPORTED FILE TYPES
      Only regular files, directories, and symbolic links are copied. A socket,
      FIFO, or device node is reported as an unsupported file type and skipped;
-     the rest of the tree is still copied, and the exit status is 1. cp -R
-     recreates these, so a tree containing one is a case where cprogress and
-     cp differ.
+     the rest of the tree is still copied, and the exit status is 1.
+
+     cp(1) differs in both directions. Under -R it recreates FIFOs and device
+     nodes. Without -R it opens the source and copies whatever bytes it
+     yields, so "cp /dev/null file" truncates file where cprogress reports an
+     error instead. cp skips sockets just as cprogress does, but it exits 0 in
+     all of these cases; cprogress exits 1, deliberately, because it leaves
+     more behind than cp does.
 
 FILE PERMISSIONS
      A newly created file or directory takes the source's permission bits
@@ -94,7 +99,9 @@ EXAMPLES
            cprogress -Rf ~/Photos /Volumes/Backup/Photos
 
      Use it in place of cp everywhere. The bar is suppressed when standard
-     error is not a terminal, so scripts see exactly what cp would print:
+     error is not a terminal, and diagnostics and -v lines use the same
+     streams and wording cp uses, so a script sees what it expects — with the
+     exceptions noted under UNSUPPORTED OPTIONS and UNSUPPORTED FILE TYPES:
 
            alias cp=cprogress
 
@@ -144,9 +151,11 @@ mod tests {
         let surfaces = [("MANUAL", MANUAL), ("man page", man.as_str()), ("README", readme.as_str())];
 
         for (name, text) in surfaces {
-            // The options this pass added to UNSUPPORTED_SHORT. The man page
-            // spells them "Fl N"; the other two use a bare "-N".
-            for flag in ['N', 'S', 'x'] {
+            // Derived from the constant, not a snapshot of it, so the next
+            // flag added to UNSUPPORTED_SHORT cannot drift in two of the three
+            // surfaces the way -N, -S and -x did. The man page spells them
+            // "Fl N"; the other two use a bare "-N".
+            for flag in crate::cli::UNSUPPORTED_SHORT {
                 assert!(
                     text.contains(&format!("-{flag}")) || text.contains(&format!("Fl {flag}")),
                     "{name} does not list -{flag} among the unsupported options"

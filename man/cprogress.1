@@ -53,14 +53,16 @@ Without
 a symbolic link is followed and whatever it points at is copied, which is also
 what
 .Xr cp 1
-does. A link to a directory is therefore reported as a directory, and a
-dangling link as a missing file.
+does.
+A link to a directory is therefore reported as a directory, and a dangling
+link as a missing file.
 .It Fl f
 If a destination file cannot be opened for writing, remove it and try again.
 .It Fl v
 Print the name of each file as it is copied, as
 .Dq source -> dest ,
-on standard output. Errors go to standard error.
+on standard output.
+Errors go to standard error.
 .Xr cp 1
 splits them the same way, so redirecting either stream behaves identically.
 .It Fl h , -help
@@ -84,15 +86,32 @@ ignored, so that a script relying on one fails visibly:
 .Pp
 Extended attributes and access control lists are not copied.
 .Sh UNSUPPORTED FILE TYPES
-Only regular files, directories, and symbolic links are copied. A socket,
-FIFO, or device node is reported as an unsupported file type and skipped; the
-rest of the tree is still copied, and the exit status is 1.
-.Nm cp Fl R
-recreates these, so a tree containing one is a case where
-.Nm
-and
+Only regular files, directories, and symbolic links are copied.
+A socket, FIFO, or device node is reported as an unsupported file type and
+skipped; the rest of the tree is still copied, and the exit status is 1.
+.Pp
 .Xr cp 1
-differ.
+differs in both directions.
+Under
+.Fl R
+it recreates FIFOs and device nodes.
+Without
+.Fl R
+it opens the source and copies whatever bytes it yields, so
+.Dq cp /dev/null file
+truncates
+.Ar file
+where
+.Nm
+reports an error instead.
+.Xr cp 1
+skips sockets just as
+.Nm
+does, but it exits 0 in all of these cases;
+.Nm
+exits 1, deliberately, because it leaves more behind than
+.Xr cp 1
+does.
 .Sh FILE PERMISSIONS
 A newly created file or directory takes the source's permission bits masked by
 the current umask. An existing destination file keeps its own permissions. Both
@@ -122,10 +141,14 @@ Copy a directory tree, replacing anything already at the destination:
 .Pp
 Use it in place of
 .Xr cp 1
-everywhere. The bar is suppressed when standard error is not a terminal, so
-scripts see exactly what
+everywhere.
+The bar is suppressed when standard error is not a terminal, and diagnostics
+and
+.Fl v
+lines use the same streams and wording
 .Xr cp 1
-would print:
+uses, so a script sees what it expects \(em with the exceptions noted under
+UNSUPPORTED OPTIONS and UNSUPPORTED FILE TYPES:
 .Pp
 .Dl alias cp=cprogress
 .Sh SEE ALSO
