@@ -31,12 +31,14 @@ pub trait Progress {
 /// The two streams are separate because `cp`'s are.
 pub struct Null<W: Write, V: Write> {
     notes: W,
-    verbose: V,
+    /// Named to match `Bar::verbose_out`, and so it does not read as the
+    /// `verbose` method three lines below it.
+    verbose_out: V,
 }
 
 impl<W: Write, V: Write> Null<W, V> {
-    pub fn new(notes: W, verbose: V) -> Self {
-        Null { notes, verbose }
+    pub fn new(notes: W, verbose_out: V) -> Self {
+        Null { notes, verbose_out }
     }
 }
 
@@ -50,10 +52,10 @@ impl<W: Write, V: Write> Progress for Null<W, V> {
         let _ = self.notes.flush();
     }
     fn verbose(&mut self, line: &str) {
-        let _ = writeln!(self.verbose, "{line}");
+        let _ = writeln!(self.verbose_out, "{line}");
         // Flushed per line so it stays interleaved with the notes on stderr
         // when both land on the same terminal.
-        let _ = self.verbose.flush();
+        let _ = self.verbose_out.flush();
     }
     fn finish(&mut self) {}
 }
