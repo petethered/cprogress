@@ -17,7 +17,7 @@ pub const PROGRAM: &str = "cprogress";
 /// which `cp` never does, so the raw errno is translated directly. Errors with
 /// no underlying errno — synthesised ones — keep their own Display, which is
 /// all there is to say about them.
-pub fn errno_text(err: &io::Error) -> String {
+fn errno_text(err: &io::Error) -> String {
     match err.raw_os_error().and_then(strerror) {
         Some(text) => text,
         None => err.to_string(),
@@ -26,16 +26,23 @@ pub fn errno_text(err: &io::Error) -> String {
 
 /// `strerror_r` rather than `strerror`: the latter may share a static buffer
 /// for unrecognised codes, and the test harness runs threads.
+///
+/// The return code is deliberately ignored in favour of checking the buffer.
+/// macOS returns `EINVAL` for an unrecognised errno but still fills the buffer
+/// with "Unknown error: N" — which is what `cp` would print. Treating a
+/// non-zero return as failure would fall back to `io::Error`'s Display and
+/// reintroduce the `(os error N)` suffix this function exists to strip.
 fn strerror(code: i32) -> Option<String> {
     let mut buf = [0 as libc::c_char; 256];
     // Safe: the buffer is live for the call and its length is passed honestly.
-    let rc = unsafe { libc::strerror_r(code, buf.as_mut_ptr(), buf.len()) };
-    if rc != 0 {
+    // strerror_r NUL-terminates whatever it writes, including on EINVAL.
+    unsafe { libc::strerror_r(code, buf.as_mut_ptr(), buf.len()) };
+    // Safe: `buf` is NUL-terminated — it was zeroed, and strerror_r terminates.
+    let text = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+    if text.is_empty() {
         return None;
     }
-    // Safe: on success strerror_r leaves a NUL-terminated string in `buf`.
-    let text = unsafe { CStr::from_ptr(buf.as_ptr()) };
-    Some(text.to_string_lossy().into_owned())
+    Some(text.into_owned())
 }
 
 /// `cprogress: <path>: <errno text>` — the shape of every I/O diagnostic
@@ -79,6 +86,20 @@ mod tests {
     fn an_error_without_an_errno_falls_back_to_its_own_display() {
         let err = io::Error::other("made up");
         assert_eq!(errno_text(&err), "made up");
+    }
+
+    #[test]
+    fn an_unrecognised_errno_still_drops_the_os_error_suffix() {
+        // macOS's strerror_r returns EINVAL here but still fills the buffer
+        // with "Unknown error: 9999". Treating the return code as failure
+        // would fall back to io::Error's Display and put the suffix back.
+        let err = io::Error::from_raw_os_error(9999);
+        let text = errno_text(&err);
+        assert!(
+            !text.contains("os error"),
+            "the raw errno leaked back in: {text:?}"
+        );
+        assert!(text.contains("9999"), "the code should still be named: {text:?}");
     }
 
     #[test]

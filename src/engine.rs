@@ -51,7 +51,7 @@ impl Runner<'_> {
     /// Whether `dst` lies under a directory whose creation already failed.
     /// `starts_with` compares whole path components, so `dest/ab` is not
     /// pruned by a failure at `dest/a`.
-    fn pruned(&self, dst: &Path) -> bool {
+    fn under_failed_dir(&self, dst: &Path) -> bool {
         self.failed_dirs.iter().any(|dir| dst.starts_with(dir))
     }
 
@@ -153,26 +153,24 @@ impl Runner<'_> {
         }
     }
 
-    /// Report a failure part-way through a file and credit the aggregate with
+    /// Report a failure that abandons a file, and credit the aggregate with
     /// the bytes that will now never be copied, so the bar still reaches 100%.
-    /// Every abandoned path through `copy_file` goes through here, so none of
-    /// them can forget the second half.
-    fn fail_remaining(&mut self, path: &Path, err: &std::io::Error, remaining: u64) {
+    /// Every *failure* path in `copy_file` goes through here; the subtraction
+    /// lives inside so no call site can do it wrong. The interrupt path
+    /// deliberately does not use this — an interrupted run should not be
+    /// dragged to 100%.
+    fn fail_remaining(&mut self, path: &Path, err: &std::io::Error, size: u64, copied: u64) {
         self.fail(path, err);
-        self.progress.advance(remaining);
+        self.progress.advance(size.saturating_sub(copied));
     }
 
     fn copy_file(&mut self, src: &Path, dst: &Path, size: u64, mode: u32, display: &Path) {
         self.progress.file_started(display, size);
 
-        // Declared before the first fallible step so every failure path can
-        // credit the aggregate with the same expression.
-        let mut copied: u64 = 0;
-
         let mut input = match File::open(src) {
             Ok(f) => f,
             Err(e) => {
-                self.fail_remaining(src, &e, size.saturating_sub(copied));
+                self.fail_remaining(src, &e, size, 0);
                 return;
             }
         };
@@ -180,12 +178,13 @@ impl Runner<'_> {
         let (mut output, existed) = match self.open_dest(dst) {
             Ok(pair) => pair,
             Err(e) => {
-                self.fail_remaining(dst, &e, size.saturating_sub(copied));
+                self.fail_remaining(dst, &e, size, 0);
                 return;
             }
         };
 
         let mut buf = vec![0u8; BUFFER_SIZE];
+        let mut copied: u64 = 0;
         loop {
             if self.aborted() {
                 self.outcome.interrupted = true;
@@ -196,13 +195,13 @@ impl Runner<'_> {
                 Ok(n) => n,
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    self.fail_remaining(src, &e, size.saturating_sub(copied));
+                    self.fail_remaining(src, &e, size, copied);
                     return;
                 }
             };
             // write_all loops internally, so short writes are handled.
             if let Err(e) = output.write_all(&buf[..n]) {
-                self.fail_remaining(dst, &e, size.saturating_sub(copied));
+                self.fail_remaining(dst, &e, size, copied);
                 return;
             }
             copied = copied.saturating_add(n as u64);
@@ -210,7 +209,7 @@ impl Runner<'_> {
         }
 
         if let Err(e) = output.flush() {
-            self.fail_remaining(dst, &e, size.saturating_sub(copied));
+            self.fail_remaining(dst, &e, size, copied);
             return;
         }
 
@@ -259,7 +258,7 @@ pub fn run(
             | CopyOp::Symlink { dst, .. }
             | CopyOp::CopyFile { dst, .. } => dst,
         };
-        if runner.pruned(target) {
+        if runner.under_failed_dir(target) {
             // The cause was reported at the directory that failed; saying it
             // again for each descendant is noise cp never makes. Still credit
             // the aggregate, as every other failure does.
@@ -549,6 +548,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pruned_subtree_reports_no_symlinks_and_no_verbose_lines() {
+        // Symlinks under a failed directory take the same skip as files, but
+        // get no byte compensation (they carry none). Nothing under a failed
+        // directory may be reported as copied, either.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("a");
+        fs::create_dir_all(src.join("inner")).expect("mkdir");
+        fs::write(src.join("f.txt"), b"body").expect("write");
+        symlink("f.txt", src.join("l")).expect("symlink");
+        symlink("f.txt", src.join("inner/l2")).expect("symlink");
+        let dst = td.path().join("dest");
+        fs::create_dir(&dst).expect("mkdir");
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let verbose = Options {
+            recursive: true,
+            verbose: true,
+            ..Options::default()
+        };
+        let p = plan_for(&[src], &dst, &verbose);
+        let total = p.total_bytes;
+        let (spy, outcome) = spy_run(&p, &verbose);
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
+
+        assert!(outcome.failed);
+        assert_eq!(spy.notes.len(), 1, "expected one error, got {:?}", spy.notes);
+        assert!(
+            spy.verbose.is_empty(),
+            "a pruned op was reported as copied: {:?}",
+            spy.verbose
+        );
+        assert_eq!(spy.advanced, total, "aggregate did not reach the total");
+    }
+
+    #[test]
     fn a_failed_directory_does_not_prune_a_sibling_with_a_shared_name_prefix() {
         // `dest/ab` must not be swallowed by a failure at `dest/a`: the check
         // is on path components, not on string prefixes.
@@ -591,19 +625,16 @@ mod tests {
             verbose: true,
             ..Options::default()
         };
-        let p = plan_for(&[src], &dst, &verbose);
-        let mut notes: Vec<u8> = Vec::new();
-        let mut lines: Vec<u8> = Vec::new();
-        let flag = AtomicBool::new(false);
-        {
-            let mut prog = Null::new(&mut notes, &mut lines);
-            run(&p, &verbose, &mut prog, &flag);
-        }
-        let out = String::from_utf8(lines).expect("utf8");
-        assert!(out.contains("->"), "got {out:?}");
-        assert!(out.contains("a"), "got {out:?}");
-        // cp -v writes to stdout; the error stream stays clean on a good copy.
-        assert!(notes.is_empty(), "a -v line reached the error stream: {notes:?}");
+        let p = plan_for(std::slice::from_ref(&src), &dst, &verbose);
+        let (spy, _) = spy_run(&p, &verbose);
+
+        // Named in full, not just "contains an a" — every tempdir path has one.
+        assert_eq!(
+            spy.verbose,
+            vec![format!("{} -> {}", src.display(), dst.display())]
+        );
+        // A clean copy produces no diagnostics at all.
+        assert!(spy.notes.is_empty(), "unexpected error: {:?}", spy.notes);
     }
 
     #[test]
@@ -622,21 +653,19 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(std::slice::from_ref(&src), &dst, &verbose);
-        let mut lines: Vec<u8> = Vec::new();
-        let flag = AtomicBool::new(false);
-        {
-            let mut prog = Null::new(std::io::sink(), &mut lines);
-            run(&p, &verbose, &mut prog, &flag);
-        }
-        let out = String::from_utf8(lines).expect("utf8");
+        let (spy, _) = spy_run(&p, &verbose);
 
-        for line in out.lines() {
+        assert!(!spy.verbose.is_empty(), "nothing was reported");
+        for line in &spy.verbose {
             let (left, right) = line.split_once(" -> ").expect("arrow");
             assert_ne!(left, right, "verbose reported dst -> dst: {line:?}");
         }
         assert!(
-            out.contains(&format!("{} -> ", src.join("sub").display())),
-            "directory not reported with its source: {out:?}"
+            spy.verbose
+                .iter()
+                .any(|l| l.starts_with(&format!("{} -> ", src.join("sub").display()))),
+            "directory not reported with its source: {:?}",
+            spy.verbose
         );
     }
 
@@ -685,28 +714,22 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(&[src], &dst, &verbose);
-        let mut notes: Vec<u8> = Vec::new();
-        let mut lines: Vec<u8> = Vec::new();
-        let flag = AtomicBool::new(false);
-        let outcome = {
-            let mut prog = Null::new(&mut notes, &mut lines);
-            run(&p, &verbose, &mut prog, &flag)
-        };
+        let (spy, outcome) = spy_run(&p, &verbose);
         // Restore so tempdir's own cleanup can remove `dst`.
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
 
         assert!(outcome.failed, "expected the directory creation to fail");
-        let notes = String::from_utf8(notes).expect("utf8");
         assert!(
-            notes.lines().any(|l| l.contains("Permission denied")),
-            "expected a permission-denied failure note: {notes:?}"
+            spy.notes.iter().any(|l| l.contains("Permission denied")),
+            "expected a permission-denied failure note: {:?}",
+            spy.notes
         );
         // Asserted on the -v stream specifically, which is the only place a
         // "src -> dst" line can now appear.
         assert!(
-            lines.is_empty(),
+            spy.verbose.is_empty(),
             "verbose reported a directory creation that actually failed: {:?}",
-            String::from_utf8_lossy(&lines)
+            spy.verbose
         );
     }
 
@@ -731,25 +754,19 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(&[src], &dst, &verbose);
-        let mut notes: Vec<u8> = Vec::new();
-        let mut lines: Vec<u8> = Vec::new();
-        let flag = AtomicBool::new(false);
-        let outcome = {
-            let mut prog = Null::new(&mut notes, &mut lines);
-            run(&p, &verbose, &mut prog, &flag)
-        };
+        let (spy, outcome) = spy_run(&p, &verbose);
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
 
         assert!(outcome.failed, "expected the symlink creation to fail");
-        let notes = String::from_utf8(notes).expect("utf8");
         assert!(
-            notes.lines().any(|l| l.contains("Permission denied")),
-            "expected a permission-denied failure note: {notes:?}"
+            spy.notes.iter().any(|l| l.contains("Permission denied")),
+            "expected a permission-denied failure note: {:?}",
+            spy.notes
         );
         assert!(
-            lines.is_empty(),
+            spy.verbose.is_empty(),
             "verbose reported a symlink creation that actually failed: {:?}",
-            String::from_utf8_lossy(&lines)
+            spy.verbose
         );
     }
 

@@ -108,15 +108,18 @@ impl<W: Write, V: Write> Bar<W, V> {
         self.lines_drawn = 0;
     }
 
+    /// Flushes unconditionally, including when there is nothing to draw. In
+    /// `Phase::Done` `lines()` is empty, and callers reach here having already
+    /// written through `clear()` or `note()`; returning early without flushing
+    /// would leave that output sitting in the buffer.
     fn draw(&mut self) {
         let lines = self.lines();
-        if lines.is_empty() {
-            return;
+        if !lines.is_empty() {
+            let _ = write!(self.out, "{}", lines.join("\n"));
+            self.lines_drawn = lines.len();
+            self.repaints += 1;
         }
-        let _ = write!(self.out, "{}", lines.join("\n"));
         let _ = self.out.flush();
-        self.lines_drawn = lines.len();
-        self.repaints += 1;
     }
 
     fn repaint(&mut self, force: bool) {
@@ -227,6 +230,47 @@ mod tests {
 
     fn rendered(sink: Vec<u8>) -> String {
         String::from_utf8(sink).expect("utf8")
+    }
+
+    /// A sink that withholds writes until they are flushed, so a missing flush
+    /// is observable here the way it would be on a real buffered stream. A
+    /// bare `Vec<u8>` cannot show this: its `flush` is a no-op.
+    #[derive(Default)]
+    struct Buffered {
+        pending: Vec<u8>,
+        flushed: Vec<u8>,
+    }
+
+    impl Write for Buffered {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed.append(&mut self.pending);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_note_is_flushed_even_when_there_is_no_bar_left_to_draw() {
+        // After finish() the phase is Done and lines() is empty, so draw() has
+        // nothing to write. It must still flush, or the note sits in the
+        // buffer and the user never sees it.
+        let mut sink = Buffered::default();
+        {
+            let mut b = Bar::new(&mut sink, std::io::sink(), Box::new(|| 80));
+            b.start(10 * MB);
+            b.file_started(Path::new("f.bin"), 10 * MB);
+            b.finish();
+            b.note("cprogress: /x: Permission denied");
+        }
+        let flushed = String::from_utf8(sink.flushed).expect("utf8");
+        assert!(
+            flushed.contains("Permission denied"),
+            "the note was never flushed: {flushed:?}"
+        );
+        assert!(sink.pending.is_empty(), "output left unflushed: {:?}", sink.pending);
     }
 
     #[test]
