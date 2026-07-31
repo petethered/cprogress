@@ -10,12 +10,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyOp {
     CreateDir { src: PathBuf, dst: PathBuf, mode: u32 },
-    /// `display` is `src` shortened to be relative to the source root's
-    /// parent directory (falling back to `src` itself when a relative form
-    /// cannot be derived). It exists only for the progress bar's per-file
-    /// line, which would otherwise be dominated by a long absolute prefix;
-    /// `-v` and error messages keep using `src`/`dst` in full.
-    CopyFile { src: PathBuf, dst: PathBuf, size: u64, display: PathBuf },
+    /// `mode` is the source's permission bits as seen during the scan, so the
+    /// engine never has to re-stat the source after copying it. `display` is
+    /// `src` shortened to be relative to the source root's parent directory
+    /// (falling back to `src` itself when a relative form cannot be derived).
+    /// It exists only for the progress bar's per-file line, which would
+    /// otherwise be dominated by a long absolute prefix; `-v` and error
+    /// messages keep using `src`/`dst` in full.
+    CopyFile { src: PathBuf, dst: PathBuf, size: u64, mode: u32, display: PathBuf },
     Symlink { src: PathBuf, target: PathBuf, dst: PathBuf },
 }
 
@@ -82,9 +84,13 @@ impl Scanner<'_> {
         self.plan.errors.push(msg::io_error(path, err));
     }
 
-    fn add_file(&mut self, src: PathBuf, dst: PathBuf, size: u64, root_parent: &Path) {
+    /// Both the size and the mode come from the `Metadata` the walk already
+    /// holds, so the engine needs no second stat of its own.
+    fn add_file(&mut self, src: PathBuf, dst: PathBuf, meta: &fs::Metadata, root_parent: &Path) {
         let display = display_path(&src, root_parent);
-        self.plan.ops.push(CopyOp::CopyFile { src, dst, size, display });
+        let size = meta.len();
+        let mode = meta.permissions().mode() & 0o7777;
+        self.plan.ops.push(CopyOp::CopyFile { src, dst, size, mode, display });
         self.plan.total_bytes = self.plan.total_bytes.saturating_add(size);
         self.plan.file_count += 1;
         (self.tick)(self.plan.file_count, self.plan.total_bytes);
@@ -168,7 +174,7 @@ impl Scanner<'_> {
         }
 
         if meta.is_file() {
-            self.add_file(src.to_path_buf(), dst.to_path_buf(), meta.len(), root_parent);
+            self.add_file(src.to_path_buf(), dst.to_path_buf(), &meta, root_parent);
             return;
         }
 
@@ -480,6 +486,24 @@ mod tests {
         let plan = build_in(&[src], &dst, &opts(false)).expect("plan");
         match &plan.ops[0] {
             CopyOp::CopyFile { display, .. } => assert_eq!(display, Path::new("a.txt")),
+            other => panic!("wrong op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_copy_op_carries_the_source_mode_from_the_scan() {
+        // The engine used to re-stat the source after copying to recover this,
+        // costing a stat per file and reopening the TOCTOU window that
+        // planning ahead exists to close. The walk already holds the metadata.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("a.txt");
+        fs::write(&src, b"hello").expect("write");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o640)).expect("chmod");
+        let dst = td.path().join("b.txt");
+
+        let plan = build_in(&[src], &dst, &opts(false)).expect("plan");
+        match &plan.ops[0] {
+            CopyOp::CopyFile { mode, .. } => assert_eq!(*mode, 0o640, "got {mode:o}"),
             other => panic!("wrong op: {other:?}"),
         }
     }

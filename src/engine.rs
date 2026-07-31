@@ -5,7 +5,7 @@ use crate::progress::Progress;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Copy chunk size. Fixed, so memory use is constant regardless of file size —
@@ -34,12 +34,25 @@ struct Runner<'a> {
     interrupted: &'a AtomicBool,
     mask: u32,
     outcome: Outcome,
+    /// Destinations whose `mkdir` failed. `cp` recurses as it copies, so a
+    /// failed directory ends that descent and yields exactly one error. This
+    /// op list is flat, so anything landing under one of these is skipped
+    /// instead of restating the same cause once per descendant — which on a
+    /// large tree would bury the real failure under thousands of ENOENTs.
+    failed_dirs: Vec<PathBuf>,
 }
 
 impl Runner<'_> {
     fn fail(&mut self, path: &Path, err: &std::io::Error) {
         self.progress.note(&msg::io_error(path, err));
         self.outcome.failed = true;
+    }
+
+    /// Whether `dst` lies under a directory whose creation already failed.
+    /// `starts_with` compares whole path components, so `dest/ab` is not
+    /// pruned by a failure at `dest/a`.
+    fn pruned(&self, dst: &Path) -> bool {
+        self.failed_dirs.iter().any(|dir| dst.starts_with(dir))
     }
 
     /// `-v` lines go to stdout via `verbose`, not to `note`: `cp` prints them
@@ -74,6 +87,9 @@ impl Runner<'_> {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => true,
             Err(e) => {
                 self.fail(dst, &e);
+                // Nothing below this can succeed, and cp would never have
+                // tried, so stop reporting the consequences.
+                self.failed_dirs.push(dst.to_path_buf());
                 false
             }
         }
@@ -137,15 +153,26 @@ impl Runner<'_> {
         }
     }
 
-    fn copy_file(&mut self, src: &Path, dst: &Path, size: u64, display: &Path) {
+    /// Report a failure part-way through a file and credit the aggregate with
+    /// the bytes that will now never be copied, so the bar still reaches 100%.
+    /// Every abandoned path through `copy_file` goes through here, so none of
+    /// them can forget the second half.
+    fn fail_remaining(&mut self, path: &Path, err: &std::io::Error, remaining: u64) {
+        self.fail(path, err);
+        self.progress.advance(remaining);
+    }
+
+    fn copy_file(&mut self, src: &Path, dst: &Path, size: u64, mode: u32, display: &Path) {
         self.progress.file_started(display, size);
+
+        // Declared before the first fallible step so every failure path can
+        // credit the aggregate with the same expression.
+        let mut copied: u64 = 0;
 
         let mut input = match File::open(src) {
             Ok(f) => f,
             Err(e) => {
-                self.fail(src, &e);
-                // Keep the aggregate honest so the bar can still reach 100%.
-                self.progress.advance(size);
+                self.fail_remaining(src, &e, size.saturating_sub(copied));
                 return;
             }
         };
@@ -153,14 +180,12 @@ impl Runner<'_> {
         let (mut output, existed) = match self.open_dest(dst) {
             Ok(pair) => pair,
             Err(e) => {
-                self.fail(dst, &e);
-                self.progress.advance(size);
+                self.fail_remaining(dst, &e, size.saturating_sub(copied));
                 return;
             }
         };
 
         let mut buf = vec![0u8; BUFFER_SIZE];
-        let mut copied: u64 = 0;
         loop {
             if self.aborted() {
                 self.outcome.interrupted = true;
@@ -171,15 +196,13 @@ impl Runner<'_> {
                 Ok(n) => n,
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    self.fail(src, &e);
-                    self.progress.advance(size.saturating_sub(copied));
+                    self.fail_remaining(src, &e, size.saturating_sub(copied));
                     return;
                 }
             };
             // write_all loops internally, so short writes are handled.
             if let Err(e) = output.write_all(&buf[..n]) {
-                self.fail(dst, &e);
-                self.progress.advance(size.saturating_sub(copied));
+                self.fail_remaining(dst, &e, size.saturating_sub(copied));
                 return;
             }
             copied = copied.saturating_add(n as u64);
@@ -187,7 +210,7 @@ impl Runner<'_> {
         }
 
         if let Err(e) = output.flush() {
-            self.fail(dst, &e);
+            self.fail_remaining(dst, &e, size.saturating_sub(copied));
             return;
         }
 
@@ -196,15 +219,13 @@ impl Runner<'_> {
             self.progress.advance(size - copied);
         }
 
+        // `mode` was captured during the scan, from the metadata the walk
+        // already held. Re-stat'ing here would cost a stat per file and reopen
+        // the very TOCTOU window plan-then-execute exists to close.
         if !existed {
-            match fs::metadata(src) {
-                Ok(m) => {
-                    let mode = (m.permissions().mode() & 0o7777) & !self.mask;
-                    if let Err(e) = fs::set_permissions(dst, fs::Permissions::from_mode(mode)) {
-                        self.fail(dst, &e);
-                    }
-                }
-                Err(e) => self.fail(src, &e),
+            let perms = fs::Permissions::from_mode(mode & !self.mask);
+            if let Err(e) = fs::set_permissions(dst, perms) {
+                self.fail(dst, &e);
             }
         }
 
@@ -224,6 +245,7 @@ pub fn run(
         interrupted,
         mask: umask(),
         outcome: Outcome::default(),
+        failed_dirs: Vec::new(),
     };
 
     for op in &plan.ops {
@@ -231,6 +253,22 @@ pub fn run(
             runner.outcome.interrupted = true;
             break;
         }
+
+        let target = match op {
+            CopyOp::CreateDir { dst, .. }
+            | CopyOp::Symlink { dst, .. }
+            | CopyOp::CopyFile { dst, .. } => dst,
+        };
+        if runner.pruned(target) {
+            // The cause was reported at the directory that failed; saying it
+            // again for each descendant is noise cp never makes. Still credit
+            // the aggregate, as every other failure does.
+            if let CopyOp::CopyFile { size, .. } = op {
+                runner.progress.advance(*size);
+            }
+            continue;
+        }
+
         match op {
             CopyOp::CreateDir { src, dst, mode } => {
                 if runner.create_dir(dst, *mode) {
@@ -242,8 +280,8 @@ pub fn run(
                     runner.verbose(src, dst);
                 }
             }
-            CopyOp::CopyFile { src, dst, size, display } => {
-                runner.copy_file(src, dst, *size, display)
+            CopyOp::CopyFile { src, dst, size, mode, display } => {
+                runner.copy_file(src, dst, *size, *mode, display)
             }
         }
     }
@@ -278,6 +316,41 @@ mod tests {
             recursive: true,
             ..Options::default()
         }
+    }
+
+    /// Records everything the engine reports, so a test can assert on any of
+    /// it without a bespoke Progress impl per case.
+    #[derive(Default)]
+    struct Spy {
+        notes: Vec<String>,
+        verbose: Vec<String>,
+        advanced: u64,
+        files: Vec<PathBuf>,
+    }
+
+    impl crate::progress::Progress for Spy {
+        fn scan_tick(&mut self, _f: usize, _b: u64) {}
+        fn start(&mut self, _t: u64, _c: usize) {}
+        fn file_started(&mut self, p: &Path, _s: u64) {
+            self.files.push(p.to_path_buf());
+        }
+        fn advance(&mut self, bytes: u64) {
+            self.advanced = self.advanced.saturating_add(bytes);
+        }
+        fn note(&mut self, l: &str) {
+            self.notes.push(l.to_string());
+        }
+        fn verbose(&mut self, l: &str) {
+            self.verbose.push(l.to_string());
+        }
+        fn finish(&mut self) {}
+    }
+
+    fn spy_run(p: &Plan, o: &Options) -> (Spy, Outcome) {
+        let mut spy = Spy::default();
+        let flag = AtomicBool::new(false);
+        let outcome = run(p, o, &mut spy, &flag);
+        (spy, outcome)
     }
 
     #[test]
@@ -429,26 +502,82 @@ mod tests {
         let p = plan_for(&[src], &dst, &recursive());
         let total = p.total_bytes;
 
-        struct Counter {
-            seen: u64,
-        }
-        impl crate::progress::Progress for Counter {
-            fn scan_tick(&mut self, _f: usize, _b: u64) {}
-            fn start(&mut self, _t: u64, _c: usize) {}
-            fn file_started(&mut self, _p: &Path, _s: u64) {}
-            fn advance(&mut self, bytes: u64) {
-                self.seen += bytes;
-            }
-            fn note(&mut self, _l: &str) {}
-            fn verbose(&mut self, _l: &str) {}
-            fn finish(&mut self) {}
-        }
+        let (spy, _) = spy_run(&p, &recursive());
 
-        let mut counter = Counter { seen: 0 };
-        let flag = AtomicBool::new(false);
-        run(&p, &recursive(), &mut counter, &flag);
+        assert_eq!(spy.advanced, total, "aggregate did not reach the total");
+    }
 
-        assert_eq!(counter.seen, total, "aggregate did not reach the total");
+    #[test]
+    fn a_failed_directory_reports_once_and_prunes_its_whole_subtree() {
+        // Verified against /bin/cp: `cp -R a d` with d unwritable prints
+        // exactly one line, "cp: d/a: Permission denied". cp recurses during
+        // the copy, so a failed mkdir ends that descent. Our op list is flat,
+        // so without pruning every descendant adds a spurious ENOENT and
+        // buries the real cause.
+        // Not root: root ignores the write-permission bit this relies on.
+        let td = tempfile::tempdir().expect("tempdir");
+        let src = td.path().join("a");
+        fs::create_dir_all(src.join("b/c/d")).expect("mkdir");
+        fs::write(src.join("x"), b"1").expect("write");
+        fs::write(src.join("b/y"), b"22").expect("write");
+        fs::write(src.join("b/c/z"), b"333").expect("write");
+        fs::write(src.join("b/c/d/w"), b"4444").expect("write");
+        let dst = td.path().join("dest");
+        fs::create_dir(&dst).expect("mkdir");
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let p = plan_for(&[src], &dst, &recursive());
+        let total = p.total_bytes;
+        let (spy, outcome) = spy_run(&p, &recursive());
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
+
+        assert!(outcome.failed, "expected the directory creation to fail");
+        assert_eq!(
+            spy.notes.len(),
+            1,
+            "one failed mkdir should produce one error, got {:?}",
+            spy.notes
+        );
+        assert!(
+            spy.notes[0].contains("Permission denied"),
+            "wrong error: {:?}",
+            spy.notes[0]
+        );
+        // Skipped ops still credit the aggregate, as other failures do, or the
+        // bar sticks below 100% forever.
+        assert_eq!(spy.advanced, total, "aggregate did not reach the total");
+    }
+
+    #[test]
+    fn a_failed_directory_does_not_prune_a_sibling_with_a_shared_name_prefix() {
+        // `dest/ab` must not be swallowed by a failure at `dest/a`: the check
+        // is on path components, not on string prefixes.
+        let td = tempfile::tempdir().expect("tempdir");
+        let a = td.path().join("a");
+        fs::create_dir(&a).expect("mkdir");
+        fs::write(a.join("f"), b"1").expect("write");
+        let ab = td.path().join("ab");
+        fs::create_dir(&ab).expect("mkdir");
+        fs::write(ab.join("g"), b"2").expect("write");
+        let dst = td.path().join("dest");
+        fs::create_dir(&dst).expect("mkdir");
+
+        let p = plan_for(&[a, ab], &dst, &recursive());
+        // Make only `dest/a` fail, by putting a file where its directory goes.
+        fs::write(dst.join("a"), b"blocker").expect("write");
+
+        let (spy, outcome) = spy_run(&p, &recursive());
+
+        assert!(outcome.failed);
+        assert_eq!(
+            fs::read(dst.join("ab/g")).expect("sibling should have been copied"),
+            b"2"
+        );
+        assert!(
+            spy.notes.iter().all(|n| !n.contains("ab")),
+            "the sibling was pruned: {:?}",
+            spy.notes
+        );
     }
 
     #[test]
@@ -525,31 +654,14 @@ mod tests {
         fs::write(src.join("sub/g.txt"), b"hi").expect("write");
         let dst = td.path().join("d");
 
-        struct Recorder {
-            seen: Vec<PathBuf>,
-        }
-        impl crate::progress::Progress for Recorder {
-            fn scan_tick(&mut self, _f: usize, _b: u64) {}
-            fn start(&mut self, _t: u64, _c: usize) {}
-            fn file_started(&mut self, p: &Path, _s: u64) {
-                self.seen.push(p.to_path_buf());
-            }
-            fn advance(&mut self, _bytes: u64) {}
-            fn note(&mut self, _l: &str) {}
-            fn verbose(&mut self, _l: &str) {}
-            fn finish(&mut self) {}
-        }
-
         let p = plan_for(std::slice::from_ref(&src), &dst, &recursive());
-        let mut recorder = Recorder { seen: Vec::new() };
-        let flag = AtomicBool::new(false);
-        run(&p, &recursive(), &mut recorder, &flag);
+        let (spy, _) = spy_run(&p, &recursive());
 
-        assert_eq!(recorder.seen, vec![PathBuf::from("s/sub/g.txt")]);
+        assert_eq!(spy.files, vec![PathBuf::from("s/sub/g.txt")]);
         assert!(
-            !recorder.seen[0].starts_with(td.path()),
+            !spy.files[0].starts_with(td.path()),
             "file line still carries the absolute prefix: {:?}",
-            recorder.seen[0]
+            spy.files[0]
         );
     }
 
@@ -668,6 +780,7 @@ mod tests {
             interrupted: &flag,
             mask: umask(),
             outcome: Outcome::default(),
+            failed_dirs: Vec::new(),
         };
 
         let result = runner.open_dest(&dst);
