@@ -215,6 +215,74 @@ fn exit_codes_match_bin_cp() {
 }
 
 #[test]
+fn verbose_goes_to_stdout_like_bin_cp() {
+    // `cp -v a b 2>/dev/null` still prints "a -> b"; ours used to print
+    // nothing, because -v shared the error stream. A script doing
+    // `cprogress -v src dst > log` must end up with the same log cp gives.
+    let td = tempfile::tempdir().expect("tempdir");
+    let src = td.path().join("a.txt");
+    fs::write(&src, b"hello").expect("write");
+
+    let ours = Command::new(BIN)
+        .arg("-v")
+        .arg(&src)
+        .arg(td.path().join("ours.txt"))
+        .output()
+        .expect("run cprogress");
+    let theirs = Command::new("/bin/cp")
+        .arg("-v")
+        .arg(&src)
+        .arg(td.path().join("theirs.txt"))
+        .output()
+        .expect("run cp");
+
+    assert!(!ours.stdout.is_empty(), "-v printed nothing on stdout");
+    assert!(!theirs.stdout.is_empty(), "test assumption broken: cp -v was silent");
+    assert!(
+        String::from_utf8_lossy(&ours.stdout).contains(" -> "),
+        "got {:?}",
+        String::from_utf8_lossy(&ours.stdout)
+    );
+    assert!(
+        ours.stderr.is_empty(),
+        "-v leaked onto stderr: {:?}",
+        String::from_utf8_lossy(&ours.stderr)
+    );
+    assert!(theirs.stderr.is_empty(), "test assumption broken: cp -v used stderr");
+}
+
+#[test]
+fn errors_stay_on_stderr_while_verbose_uses_stdout() {
+    // One source copies, one fails. The two lines must land on different
+    // streams, exactly as cp splits them.
+    let td = tempfile::tempdir().expect("tempdir");
+    let good = td.path().join("good.txt");
+    fs::write(&good, b"fine").expect("write");
+    let bad = td.path().join("bad.txt");
+    fs::write(&bad, b"nope").expect("write");
+    fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let out = td.path().join("out");
+    fs::create_dir(&out).expect("mkdir");
+
+    let ours = Command::new(BIN)
+        .arg("-v")
+        .arg(&good)
+        .arg(&bad)
+        .arg(&out)
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&ours.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ours.stderr).into_owned();
+
+    assert!(stdout.contains("good.txt -> "), "-v line missing from stdout: {stdout:?}");
+    assert!(!stdout.contains("Permission denied"), "an error reached stdout: {stdout:?}");
+    assert!(stderr.contains("Permission denied"), "error missing from stderr: {stderr:?}");
+    assert!(!stderr.contains(" -> "), "a -v line reached stderr: {stderr:?}");
+    assert_eq!(ours.status.code(), Some(1));
+}
+
+#[test]
 fn symlinks_without_recursive_are_followed_like_bin_cp() {
     // The existing symlink coverage only runs -Rf, where both implementations
     // preserve links. Without -R, cp dereferences, and we must too.

@@ -51,14 +51,17 @@ fn main() -> ExitCode {
         ProgressMode::None => false,
     };
 
+    // The bar and every diagnostic go to stderr; -v lines go to stdout, which
+    // is where cp puts them.
     let mut boxed: Box<dyn Progress> = if use_bar {
         let fd = stderr.as_raw_fd();
         Box::new(Bar::new(
             io::stderr(),
+            io::stdout(),
             Box::new(move || term::width_or_fallback(fd)),
         ))
     } else {
-        Box::new(Null::new(io::stderr()))
+        Box::new(Null::new(io::stderr(), io::stdout()))
     };
     let progress = boxed.as_mut();
 

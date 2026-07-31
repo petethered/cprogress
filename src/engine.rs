@@ -42,10 +42,12 @@ impl Runner<'_> {
         self.outcome.failed = true;
     }
 
+    /// `-v` lines go to stdout via `verbose`, not to `note`: `cp` prints them
+    /// there, and a script redirecting stdout must capture them.
     fn verbose(&mut self, src: &Path, dst: &Path) {
         if self.opts.verbose {
             self.progress
-                .note(&format!("{} -> {}", src.display(), dst.display()));
+                .verbose(&format!("{} -> {}", src.display(), dst.display()));
         }
     }
 
@@ -261,7 +263,7 @@ mod tests {
 
     fn run_plan(p: &Plan, o: &Options) -> Outcome {
         let mut sink: Vec<u8> = Vec::new();
-        let mut prog = Null::new(&mut sink);
+        let mut prog = Null::new(&mut sink, std::io::sink());
         let flag = AtomicBool::new(false);
         run(p, o, &mut prog, &flag)
     }
@@ -399,7 +401,7 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(false);
         let outcome = {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(&mut sink, std::io::sink());
             run(&p, &recursive(), &mut prog, &flag)
         };
 
@@ -438,6 +440,7 @@ mod tests {
                 self.seen += bytes;
             }
             fn note(&mut self, _l: &str) {}
+            fn verbose(&mut self, _l: &str) {}
             fn finish(&mut self) {}
         }
 
@@ -460,15 +463,18 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(&[src], &dst, &verbose);
-        let mut sink: Vec<u8> = Vec::new();
+        let mut notes: Vec<u8> = Vec::new();
+        let mut lines: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(false);
         {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(&mut notes, &mut lines);
             run(&p, &verbose, &mut prog, &flag);
         }
-        let out = String::from_utf8(sink).expect("utf8");
+        let out = String::from_utf8(lines).expect("utf8");
         assert!(out.contains("->"), "got {out:?}");
         assert!(out.contains("a"), "got {out:?}");
+        // cp -v writes to stdout; the error stream stays clean on a good copy.
+        assert!(notes.is_empty(), "a -v line reached the error stream: {notes:?}");
     }
 
     #[test]
@@ -487,13 +493,13 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(std::slice::from_ref(&src), &dst, &verbose);
-        let mut sink: Vec<u8> = Vec::new();
+        let mut lines: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(false);
         {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(std::io::sink(), &mut lines);
             run(&p, &verbose, &mut prog, &flag);
         }
-        let out = String::from_utf8(sink).expect("utf8");
+        let out = String::from_utf8(lines).expect("utf8");
 
         for line in out.lines() {
             let (left, right) = line.split_once(" -> ").expect("arrow");
@@ -530,6 +536,7 @@ mod tests {
             }
             fn advance(&mut self, _bytes: u64) {}
             fn note(&mut self, _l: &str) {}
+            fn verbose(&mut self, _l: &str) {}
             fn finish(&mut self) {}
         }
 
@@ -566,24 +573,28 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(&[src], &dst, &verbose);
-        let mut sink: Vec<u8> = Vec::new();
+        let mut notes: Vec<u8> = Vec::new();
+        let mut lines: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(false);
         let outcome = {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(&mut notes, &mut lines);
             run(&p, &verbose, &mut prog, &flag)
         };
         // Restore so tempdir's own cleanup can remove `dst`.
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
 
         assert!(outcome.failed, "expected the directory creation to fail");
-        let out = String::from_utf8(sink).expect("utf8");
+        let notes = String::from_utf8(notes).expect("utf8");
         assert!(
-            out.lines().any(|l| l.contains("Permission denied")),
-            "expected a permission-denied failure note: {out:?}"
+            notes.lines().any(|l| l.contains("Permission denied")),
+            "expected a permission-denied failure note: {notes:?}"
         );
+        // Asserted on the -v stream specifically, which is the only place a
+        // "src -> dst" line can now appear.
         assert!(
-            !out.contains("->"),
-            "verbose reported a directory creation that actually failed: {out:?}"
+            lines.is_empty(),
+            "verbose reported a directory creation that actually failed: {:?}",
+            String::from_utf8_lossy(&lines)
         );
     }
 
@@ -608,23 +619,25 @@ mod tests {
             ..Options::default()
         };
         let p = plan_for(&[src], &dst, &verbose);
-        let mut sink: Vec<u8> = Vec::new();
+        let mut notes: Vec<u8> = Vec::new();
+        let mut lines: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(false);
         let outcome = {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(&mut notes, &mut lines);
             run(&p, &verbose, &mut prog, &flag)
         };
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
 
         assert!(outcome.failed, "expected the symlink creation to fail");
-        let out = String::from_utf8(sink).expect("utf8");
+        let notes = String::from_utf8(notes).expect("utf8");
         assert!(
-            out.lines().any(|l| l.contains("Permission denied")),
-            "expected a permission-denied failure note: {out:?}"
+            notes.lines().any(|l| l.contains("Permission denied")),
+            "expected a permission-denied failure note: {notes:?}"
         );
         assert!(
-            !out.contains("->"),
-            "verbose reported a symlink creation that actually failed: {out:?}"
+            lines.is_empty(),
+            "verbose reported a symlink creation that actually failed: {:?}",
+            String::from_utf8_lossy(&lines)
         );
     }
 
@@ -647,7 +660,7 @@ mod tests {
             ..Options::default()
         };
         let mut sink: Vec<u8> = Vec::new();
-        let mut prog = Null::new(&mut sink);
+        let mut prog = Null::new(&mut sink, std::io::sink());
         let flag = AtomicBool::new(false);
         let mut runner = Runner {
             opts: &forced,
@@ -693,7 +706,7 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let flag = AtomicBool::new(true); // already interrupted
         let outcome = {
-            let mut prog = Null::new(&mut sink);
+            let mut prog = Null::new(&mut sink, std::io::sink());
             run(&p, &recursive(), &mut prog, &flag)
         };
 

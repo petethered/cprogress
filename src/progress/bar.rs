@@ -16,8 +16,14 @@ enum Phase {
 }
 
 /// The two-line repainting display.
-pub struct Bar<W: Write> {
+///
+/// `out` carries the bar and every diagnostic; it is stderr in practice.
+/// `verbose_out` carries `-v` lines only, and is stdout, because that is where
+/// `cp` puts them. The two can be the same terminal, so the bar is erased and
+/// that erase flushed before anything is written to the other stream.
+pub struct Bar<W: Write, V: Write> {
     out: W,
+    verbose_out: V,
     width: Box<dyn Fn() -> usize>,
     phase: Phase,
 
@@ -38,11 +44,12 @@ pub struct Bar<W: Write> {
     repaints: usize,
 }
 
-impl<W: Write> Bar<W> {
-    pub fn new(out: W, width: Box<dyn Fn() -> usize>) -> Self {
+impl<W: Write, V: Write> Bar<W, V> {
+    pub fn new(out: W, verbose_out: V, width: Box<dyn Fn() -> usize>) -> Self {
         let now = Instant::now();
         Bar {
             out,
+            verbose_out,
             width,
             phase: Phase::Scanning,
             scan_files: 0,
@@ -132,7 +139,7 @@ impl<W: Write> Bar<W> {
     }
 }
 
-impl<W: Write> Progress for Bar<W> {
+impl<W: Write, V: Write> Progress for Bar<W, V> {
     fn scan_tick(&mut self, files: usize, bytes: u64) {
         self.scan_files = files;
         self.scan_bytes = bytes;
@@ -165,8 +172,19 @@ impl<W: Write> Progress for Bar<W> {
     fn note(&mut self, line: &str) {
         self.clear();
         let _ = writeln!(self.out, "{line}");
+        // draw() flushes, so the line reaches the terminal with the redraw.
         self.draw();
+    }
+
+    fn verbose(&mut self, line: &str) {
+        self.clear();
+        // The erase must land before the other stream writes, or the -v line
+        // is printed into the columns the bar still occupies. draw()'s own
+        // flush comes too late for that, so flush here.
         let _ = self.out.flush();
+        let _ = writeln!(self.verbose_out, "{line}");
+        let _ = self.verbose_out.flush();
+        self.draw();
     }
 
     fn finish(&mut self) {
@@ -195,8 +213,16 @@ mod tests {
 
     const MB: u64 = 1024 * 1024;
 
-    fn bar_with(sink: &mut Vec<u8>, width: usize) -> Bar<&mut Vec<u8>> {
-        Bar::new(sink, Box::new(move || width))
+    fn bar_with(sink: &mut Vec<u8>, width: usize) -> Bar<&mut Vec<u8>, std::io::Sink> {
+        Bar::new(sink, std::io::sink(), Box::new(move || width))
+    }
+
+    fn bar_with_verbose<'a>(
+        sink: &'a mut Vec<u8>,
+        verbose: &'a mut Vec<u8>,
+        width: usize,
+    ) -> Bar<&'a mut Vec<u8>, &'a mut Vec<u8>> {
+        Bar::new(sink, verbose, Box::new(move || width))
     }
 
     fn rendered(sink: Vec<u8>) -> String {
@@ -255,13 +281,35 @@ mod tests {
             let mut b = bar_with(&mut sink, 80);
             b.start(100 * MB, 1);
             b.file_started(Path::new("big.bin"), 100 * MB);
-            b.note("src -> dst");
+            b.note("cprogress: /x: Permission denied");
         }
         let out = rendered(sink);
-        assert!(out.contains("src -> dst"), "note missing: {out:?}");
+        assert!(out.contains("Permission denied"), "note missing: {out:?}");
         // The bar is redrawn after the note, so the aggregate label appears again.
         let label_count = out.matches("total ").count();
         assert!(label_count >= 2, "bar not redrawn after note: {out:?}");
+    }
+
+    #[test]
+    fn verbose_writes_to_the_other_stream_and_redraws() {
+        // The line goes to stdout, as cp's does; the bar stays on stderr.
+        let mut sink = Vec::new();
+        let mut verbose = Vec::new();
+        {
+            let mut b = bar_with_verbose(&mut sink, &mut verbose, 80);
+            b.start(100 * MB, 1);
+            b.file_started(Path::new("big.bin"), 100 * MB);
+            b.verbose("src -> dst");
+        }
+        assert_eq!(rendered(verbose), "src -> dst\n");
+        let out = rendered(sink);
+        assert!(!out.contains("src -> dst"), "-v leaked onto the bar stream: {out:?}");
+        // The bar stream still carries the erase and the redraw.
+        assert!(out.contains("\x1b[2K"), "bar was not cleared: {out:?}");
+        assert!(
+            out.matches("total ").count() >= 2,
+            "bar not redrawn after a -v line: {out:?}"
+        );
     }
 
     #[test]
