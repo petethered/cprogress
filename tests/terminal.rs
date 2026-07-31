@@ -114,6 +114,10 @@ fn draws_a_bar_on_a_pty() {
     fs::create_dir(&src).expect("mkdir");
     // Large enough to cross the per-file bar threshold.
     fs::write(src.join("big.bin"), vec![0u8; 12 * 1024 * 1024]).expect("write");
+    // A second file, so this exercises the aggregate + per-file layout. With
+    // one file the display deliberately collapses to a single line, which
+    // `single_file_draws_one_line_on_a_pty` covers.
+    fs::write(src.join("other.bin"), vec![0u8; 9 * 1024 * 1024]).expect("write");
     let dst = td.path().join("d");
 
     let mut master: libc::c_int = 0;
@@ -156,5 +160,53 @@ fn draws_a_bar_on_a_pty() {
 
     assert!(out.contains("total"), "no aggregate bar: {out:?}");
     assert!(out.contains("big.bin"), "no file line: {out:?}");
+    assert!(out.contains("copied in"), "no summary: {out:?}");
+}
+
+#[test]
+fn single_file_draws_one_line_on_a_pty() {
+    // Copying one file makes the aggregate line and the per-file line show the
+    // same numbers, so the display collapses to a single line naming the file
+    // and carrying the rate and ETA.
+    let td = tempfile::tempdir().expect("tempdir");
+    let src = td.path().join("only.bin");
+    fs::write(&src, vec![0u8; 12 * 1024 * 1024]).expect("write");
+    let dst = td.path().join("copy.bin");
+
+    let mut master: libc::c_int = 0;
+    let mut slave: libc::c_int = 0;
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+
+    let mut child = Command::new(BIN)
+        .arg(&src)
+        .arg(&dst)
+        .stderr(unsafe { Stdio::from_raw_fd(slave) })
+        .spawn()
+        .expect("spawn");
+
+    // Drained before wait() for the same reason as draws_a_bar_on_a_pty.
+    let mut reader = unsafe { fs::File::from_raw_fd(master) };
+    let mut buf = Vec::new();
+    let _ = reader.read_to_end(&mut buf);
+    let out = String::from_utf8_lossy(&buf);
+
+    let status = child.wait().expect("wait");
+    assert!(status.success());
+
+    assert!(
+        !out.contains("total"),
+        "single-file copy still drew the aggregate line: {out:?}"
+    );
+    assert!(out.contains("only.bin"), "file not named: {out:?}");
+    assert!(out.contains("/12.0M"), "no done/total figure: {out:?}");
     assert!(out.contains("copied in"), "no summary: {out:?}");
 }

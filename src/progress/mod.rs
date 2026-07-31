@@ -8,10 +8,12 @@ use std::path::Path;
 pub trait Progress {
     /// Called during the pre-scan as sources are walked.
     fn scan_tick(&mut self, files: usize, bytes: u64);
-    /// Ends the scan phase and begins the copy phase. Only the byte total is
-    /// passed: the aggregate line has no file-count component, so a file count
-    /// here would be a parameter every implementor ignores.
-    fn start(&mut self, total_bytes: u64);
+    /// Ends the scan phase and begins the copy phase.
+    ///
+    /// `file_count` selects the layout: with exactly one file the aggregate and
+    /// per-file lines would show identical numbers, so they collapse into a
+    /// single line naming that file.
+    fn start(&mut self, total_bytes: u64, file_count: usize);
     fn file_started(&mut self, path: &Path, size: u64);
     fn advance(&mut self, bytes: u64);
     /// A diagnostic that must appear above the bar. Goes to stderr, where
@@ -44,7 +46,7 @@ impl<W: Write, V: Write> Null<W, V> {
 
 impl<W: Write, V: Write> Progress for Null<W, V> {
     fn scan_tick(&mut self, _files: usize, _bytes: u64) {}
-    fn start(&mut self, _total_bytes: u64) {}
+    fn start(&mut self, _total_bytes: u64, _file_count: usize) {}
     fn file_started(&mut self, _path: &Path, _size: u64) {}
     fn advance(&mut self, _bytes: u64) {}
     fn note(&mut self, line: &str) {
@@ -71,7 +73,7 @@ mod tests {
         let mut verbose: Vec<u8> = Vec::new();
         let mut p = Null::new(&mut sink, &mut verbose);
         p.scan_tick(10, 1000);
-        p.start(1000);
+        p.start(1000, 2);
         p.file_started(Path::new("a.txt"), 500);
         p.advance(500);
         p.finish();

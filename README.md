@@ -17,6 +17,13 @@ The top line tracks the whole operation; the bottom line tracks the file being
 copied right now. Files smaller than 8 MiB show just their path, since a bar
 that fills instantly is noise rather than information.
 
+Copying a single file collapses this to one line, because the two would
+otherwise show the same numbers:
+
+```
+vacation.mov  44%[==================>                ] 1.24G/2.79G  279MB/s  eta 5s
+```
+
 ## Install
 
 Requires a Rust toolchain and macOS.

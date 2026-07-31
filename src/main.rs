@@ -88,7 +88,7 @@ fn main() -> ExitCode {
         progress.note(line);
     }
 
-    progress.start(plan.total_bytes);
+    progress.start(plan.total_bytes, plan.file_count);
     let outcome = engine::run(&plan, &invocation.options, progress, &INTERRUPTED);
     progress.finish();
 

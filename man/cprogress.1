@@ -41,6 +41,10 @@ The display is two lines: an aggregate bar for the whole operation, and a bar
 for the file being copied. Files smaller than 8 MiB show only their path,
 because a bar that fills within a single read is noise rather than information.
 .Pp
+Copying a single file collapses the display to one line, which names the file
+and carries the transferred total, rate and estimate; the two lines would
+otherwise show the same numbers.
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl R , r

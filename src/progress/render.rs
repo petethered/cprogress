@@ -124,11 +124,50 @@ pub fn file_line(width: usize, path: &str, done: u64, size: u64) -> String {
     format!("{name}{pct}[{}]{tail}", bar(bar_cols, fraction(done, size)))
 }
 
+/// `big.bin  62%[===========>      ] 4.21G/6.8G  118MB/s  eta 22s`
+///
+/// Used when the whole operation is a single file. The aggregate line and the
+/// per-file line would carry identical numbers, so they collapse into one that
+/// names the file and owns the rate and ETA.
+///
+/// Unlike [`file_line`], this ignores [`FILE_BAR_MIN_BYTES`]: that threshold
+/// exists to stop the per-file line strobing as a tree of small files flies
+/// past, and with a single file there is nothing to strobe against.
+pub fn single_line(
+    width: usize,
+    path: &str,
+    done: u64,
+    total: u64,
+    rate: Option<f64>,
+    eta: Option<Duration>,
+) -> String {
+    let tail = format!(
+        " {}/{}  {}  {}",
+        human_bytes(done),
+        human_bytes(total),
+        human_rate(rate),
+        human_eta(eta)
+    );
+    let pct = format!(" {:>3}%", percent(done, total));
+    // Brackets plus the narrowest bar worth drawing.
+    let overhead = pct.chars().count() + tail.chars().count() + 2;
+    let name_budget = width.saturating_sub(overhead + MIN_BAR_COLUMNS);
+    if name_budget == 0 {
+        // No room for a name plus a bar; fall back to the numbers alone, which
+        // are what the user is actually watching.
+        return truncate_to(format!("{}{pct}{tail}", middle_ellipsize(path, 0)), width);
+    }
+    let name = middle_ellipsize(path, name_budget);
+    let bar_cols = width.saturating_sub(name.chars().count() + overhead);
+    format!("{name}{pct}[{}]{tail}", bar(bar_cols, fraction(done, total)))
+}
+
 /// `Scanning... 41,203 files, 88.2G`
 pub fn scan_line(files: usize, bytes: u64) -> String {
     format!(
-        "Scanning... {} files, {}",
+        "Scanning... {} {}, {}",
         human_count(files),
+        if files == 1 { "file" } else { "files" },
         human_bytes(bytes)
     )
 }
@@ -272,11 +311,82 @@ mod tests {
     }
 
     #[test]
+    fn single_line_carries_name_progress_rate_and_eta() {
+        let line = single_line(
+            80,
+            "big.bin",
+            3 * GB,
+            6 * GB,
+            Some(118.0 * MB as f64),
+            Some(Duration::from_secs(22)),
+        );
+        assert!(line.starts_with("big.bin"), "got {line:?}");
+        assert!(line.contains(" 50%"), "got {line:?}");
+        assert!(line.contains("3.00G/6.00G"), "got {line:?}");
+        assert!(line.contains("118MB/s"), "got {line:?}");
+        assert!(line.contains("eta 22s"), "got {line:?}");
+        assert!(line.contains('['), "expected a bar: {line:?}");
+        assert!(line.chars().count() <= 80, "overflowed: {line:?}");
+    }
+
+    #[test]
+    fn single_line_shows_a_bar_below_the_per_file_threshold() {
+        // FILE_BAR_MIN_BYTES exists to stop the per-file line strobing as many
+        // small files fly past. With one file there is nothing to strobe
+        // against, so a small file still gets a bar and an ETA.
+        // Even, so the halfway point lands on exactly 50% rather than flooring.
+        let small = FILE_BAR_MIN_BYTES - 2;
+        assert!(small < FILE_BAR_MIN_BYTES, "fixture must be under the threshold");
+        assert!(
+            !file_line(80, "notes.txt", small / 2, small).contains('['),
+            "fixture should get no bar from the multi-file layout"
+        );
+        let line = single_line(80, "notes.txt", small / 2, small, None, None);
+        assert!(line.contains('['), "expected a bar: {line:?}");
+        assert!(line.contains(" 50%"), "got {line:?}");
+    }
+
+    #[test]
+    fn single_line_fits_every_width() {
+        let long = "a/".repeat(100) + "final.bin";
+        for width in [10usize, 20, 40, 56, 80, 200] {
+            for path in ["f.bin", long.as_str()] {
+                let line = single_line(
+                    width,
+                    path,
+                    GB,
+                    4 * GB,
+                    Some(100.0 * MB as f64),
+                    Some(Duration::from_secs(30)),
+                );
+                assert!(
+                    line.chars().count() <= width,
+                    "width {width} overflowed with {path:?}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_line_handles_a_zero_byte_total() {
+        let line = single_line(80, "empty.txt", 0, 0, None, None);
+        assert!(line.contains("100%"), "got {line:?}");
+        assert!(line.chars().count() <= 80, "overflowed: {line:?}");
+    }
+
+    #[test]
     fn scan_line_reports_files_and_bytes() {
         let line = scan_line(41_203, (88.2 * GB as f64) as u64);
         assert!(line.starts_with("Scanning..."), "got {line:?}");
         assert!(line.contains("41,203 files"), "got {line:?}");
         assert!(line.contains("88.2G"), "got {line:?}");
+    }
+
+    #[test]
+    fn scan_line_says_one_file_not_one_files() {
+        assert!(scan_line(1, 1024).contains("1 file,"), "{}", scan_line(1, 1024));
+        assert!(scan_line(0, 0).contains("0 files,"), "{}", scan_line(0, 0));
+        assert!(scan_line(2, 0).contains("2 files,"), "{}", scan_line(2, 0));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::progress::render::{aggregate_line, file_line, scan_line, summary_line};
+use crate::progress::render::{aggregate_line, file_line, scan_line, single_line, summary_line};
 use crate::progress::Progress;
 use crate::rate::{RateEstimator, HALF_LIFE_SECS};
 use std::io::Write;
@@ -32,6 +32,9 @@ pub struct Bar<W: Write, V: Write> {
 
     total_bytes: u64,
     done_bytes: u64,
+    /// Number of files in the plan. One means the aggregate and per-file lines
+    /// would be redundant, so the display collapses to a single line.
+    file_count: usize,
     file_path: String,
     file_size: u64,
     file_done: u64,
@@ -56,6 +59,7 @@ impl<W: Write, V: Write> Bar<W, V> {
             scan_bytes: 0,
             total_bytes: 0,
             done_bytes: 0,
+            file_count: 0,
             file_path: String::new(),
             file_size: 0,
             file_done: 0,
@@ -79,6 +83,25 @@ impl<W: Write, V: Write> Bar<W, V> {
             Phase::Scanning => vec![scan_line(self.scan_files, self.scan_bytes)],
             Phase::Copying => {
                 let remaining = self.total_bytes.saturating_sub(self.done_bytes);
+                if self.file_count == 1 {
+                    // `start` fires before the first `file_started`, so the
+                    // name is not known yet for one frame. Draw nothing rather
+                    // than a nameless bar; `file_started` forces a repaint.
+                    if self.file_path.is_empty() {
+                        return Vec::new();
+                    }
+                    // One file: the aggregate and per-file lines would carry
+                    // identical numbers, so show one line that names the file
+                    // and owns the rate and ETA.
+                    return vec![single_line(
+                        width,
+                        &self.file_path,
+                        self.done_bytes,
+                        self.total_bytes,
+                        self.rate.rate(),
+                        self.rate.eta(remaining),
+                    )];
+                }
                 vec![
                     aggregate_line(
                         width,
@@ -149,10 +172,11 @@ impl<W: Write, V: Write> Progress for Bar<W, V> {
         self.repaint(false);
     }
 
-    fn start(&mut self, total_bytes: u64) {
+    fn start(&mut self, total_bytes: u64, file_count: usize) {
         self.clear();
         self.phase = Phase::Copying;
         self.total_bytes = total_bytes;
+        self.file_count = file_count;
         self.started = Instant::now();
         self.last_paint = self.started;
         self.repaint(true);
@@ -260,7 +284,7 @@ mod tests {
         let mut sink = Buffered::default();
         {
             let mut b = Bar::new(&mut sink, std::io::sink(), Box::new(|| 80));
-            b.start(10 * MB);
+            b.start(10 * MB, 2);
             b.file_started(Path::new("f.bin"), 10 * MB);
             b.finish();
             b.note("cprogress: /x: Permission denied");
@@ -290,7 +314,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB);
+            b.start(100 * MB, 2);
             b.file_started(Path::new("big.bin"), 50 * MB);
         }
         let out = rendered(sink);
@@ -300,11 +324,56 @@ mod tests {
     }
 
     #[test]
+    fn a_single_file_collapses_to_one_line() {
+        // With one file the aggregate and per-file lines would show identical
+        // numbers, so the display is one line naming the file.
+        let mut sink = Vec::new();
+        {
+            let mut b = bar_with(&mut sink, 80);
+            b.start(50 * MB, 1);
+            b.file_started(Path::new("big.bin"), 50 * MB);
+            b.advance(25 * MB);
+        }
+        let out = rendered(sink);
+        let frames: Vec<&str> = out.split('\r').collect();
+        let last = frames.last().copied().unwrap_or("");
+        assert!(
+            !last.contains("total"),
+            "single-file display kept the aggregate label: {last:?}"
+        );
+        assert!(last.contains("big.bin"), "file not named: {last:?}");
+        assert!(
+            last.contains("/50.0M"),
+            "expected done/total on the one line: {last:?}"
+        );
+        for frame in &frames {
+            let visible = strip_ansi(frame);
+            assert!(
+                !visible.trim_end().contains('\n'),
+                "single-file display drew more than one line: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_files_keep_the_aggregate_and_file_lines() {
+        let mut sink = Vec::new();
+        {
+            let mut b = bar_with(&mut sink, 80);
+            b.start(100 * MB, 2);
+            b.file_started(Path::new("big.bin"), 50 * MB);
+        }
+        let out = rendered(sink);
+        assert!(out.contains("total"), "aggregate line missing: {out:?}");
+        assert!(out.contains('\n'), "expected two lines: {out:?}");
+    }
+
+    #[test]
     fn advance_is_throttled_between_repaints() {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB);
+            b.start(100 * MB, 2);
             b.file_started(Path::new("big.bin"), 100 * MB);
             let after_setup = b.repaints();
             for _ in 0..1000 {
@@ -323,7 +392,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB);
+            b.start(100 * MB, 2);
             b.file_started(Path::new("big.bin"), 100 * MB);
             b.note("cprogress: /x: Permission denied");
         }
@@ -341,7 +410,7 @@ mod tests {
         let mut verbose = Vec::new();
         {
             let mut b = bar_with_verbose(&mut sink, &mut verbose, 80);
-            b.start(100 * MB);
+            b.start(100 * MB, 2);
             b.file_started(Path::new("big.bin"), 100 * MB);
             b.verbose("src -> dst");
         }
@@ -361,7 +430,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(10 * MB);
+            b.start(10 * MB, 2);
             b.file_started(Path::new("big.bin"), 10 * MB);
             b.advance(10 * MB);
             b.finish();
@@ -376,7 +445,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(20 * MB);
+            b.start(20 * MB, 2);
             b.file_started(Path::new("first.bin"), 10 * MB);
             b.advance(10 * MB);
             b.file_started(Path::new("second.bin"), 10 * MB);
@@ -390,7 +459,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 40);
-            b.start(100 * MB);
+            b.start(100 * MB, 2);
             b.file_started(Path::new("some/deep/path/to/a/file.bin"), 100 * MB);
         }
         let out = rendered(sink);

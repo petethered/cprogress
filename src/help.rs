@@ -32,6 +32,10 @@ DESCRIPTION
      path, because a bar that fills within a single read is noise rather than
      information.
 
+     Copying a single file collapses the display to one line, which names the
+     file and carries the transferred total, rate and estimate; the two lines
+     would otherwise show the same numbers.
+
      The options are as follows:
 
      -R, -r  Copy directory hierarchies recursively. Symbolic links are
