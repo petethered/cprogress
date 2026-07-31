@@ -39,8 +39,11 @@ pub enum PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // The errno text comes from the system rather than a hardcoded
+            // string, so it cannot drift from what `cp` prints for ENOTDIR.
             PlanError::DestNotDirectory(p) => {
-                write!(f, "{PROGRAM}: {}: Not a directory", p.display())
+                let err = io::Error::from_raw_os_error(libc::ENOTDIR);
+                write!(f, "{}", msg::io_error(p, &err))
             }
         }
     }

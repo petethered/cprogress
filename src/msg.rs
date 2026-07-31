@@ -1,8 +1,10 @@
 //! Diagnostic text shared by every module that writes to stderr.
 //!
 //! `cp` prefixes each diagnostic with its own name and nothing else, so the
-//! prefix and the errno wording both live here rather than being rebuilt at
-//! each call site.
+//! prefix and the errno wording live here rather than being rebuilt at each
+//! call site. The `cp`-verbatim phrases that are not errno text — "is a
+//! directory (not copied).", "are identical (not copied)." and friends — stay
+//! at their single use site in `plan`, since there is nothing to share.
 
 use std::ffi::CStr;
 use std::io;
