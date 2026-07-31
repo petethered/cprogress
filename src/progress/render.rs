@@ -116,11 +116,11 @@ pub fn file_line(width: usize, path: &str, done: u64, size: u64) -> String {
         return truncate_to(middle_ellipsize(path, width), width);
     }
     let name = middle_ellipsize(path, name_budget);
-    let fixed = name.chars().count() + overhead;
-    let bar_cols = width.saturating_sub(fixed);
-    if bar_cols < MIN_BAR_COLUMNS {
-        return truncate_to(format!("{name}{pct}{tail}"), width);
-    }
+    // `name_budget` was width - (overhead + MIN_BAR_COLUMNS) and is non-zero,
+    // so the subtraction did not saturate and `name` is at most that many
+    // characters. `bar_cols` is therefore always at least MIN_BAR_COLUMNS
+    // here — no need for the aggregate line's drop-the-bar fallback.
+    let bar_cols = width.saturating_sub(name.chars().count() + overhead);
     format!("{name}{pct}[{}]{tail}", bar(bar_cols, fraction(done, size)))
 }
 

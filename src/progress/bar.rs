@@ -146,7 +146,7 @@ impl<W: Write, V: Write> Progress for Bar<W, V> {
         self.repaint(false);
     }
 
-    fn start(&mut self, total_bytes: u64, _file_count: usize) {
+    fn start(&mut self, total_bytes: u64) {
         self.clear();
         self.phase = Phase::Copying;
         self.total_bytes = total_bytes;
@@ -246,7 +246,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB, 2);
+            b.start(100 * MB);
             b.file_started(Path::new("big.bin"), 50 * MB);
         }
         let out = rendered(sink);
@@ -260,7 +260,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB, 1);
+            b.start(100 * MB);
             b.file_started(Path::new("big.bin"), 100 * MB);
             let after_setup = b.repaints();
             for _ in 0..1000 {
@@ -279,7 +279,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(100 * MB, 1);
+            b.start(100 * MB);
             b.file_started(Path::new("big.bin"), 100 * MB);
             b.note("cprogress: /x: Permission denied");
         }
@@ -297,7 +297,7 @@ mod tests {
         let mut verbose = Vec::new();
         {
             let mut b = bar_with_verbose(&mut sink, &mut verbose, 80);
-            b.start(100 * MB, 1);
+            b.start(100 * MB);
             b.file_started(Path::new("big.bin"), 100 * MB);
             b.verbose("src -> dst");
         }
@@ -317,7 +317,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(10 * MB, 1);
+            b.start(10 * MB);
             b.file_started(Path::new("big.bin"), 10 * MB);
             b.advance(10 * MB);
             b.finish();
@@ -332,7 +332,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 80);
-            b.start(20 * MB, 2);
+            b.start(20 * MB);
             b.file_started(Path::new("first.bin"), 10 * MB);
             b.advance(10 * MB);
             b.file_started(Path::new("second.bin"), 10 * MB);
@@ -346,7 +346,7 @@ mod tests {
         let mut sink = Vec::new();
         {
             let mut b = bar_with(&mut sink, 40);
-            b.start(100 * MB, 1);
+            b.start(100 * MB);
             b.file_started(Path::new("some/deep/path/to/a/file.bin"), 100 * MB);
         }
         let out = rendered(sink);

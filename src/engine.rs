@@ -330,7 +330,7 @@ mod tests {
 
     impl crate::progress::Progress for Spy {
         fn scan_tick(&mut self, _f: usize, _b: u64) {}
-        fn start(&mut self, _t: u64, _c: usize) {}
+        fn start(&mut self, _t: u64) {}
         fn file_started(&mut self, p: &Path, _s: u64) {
             self.files.push(p.to_path_buf());
         }
