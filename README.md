@@ -1,5 +1,7 @@
 # cprogress
 
+[![CI](https://github.com/petethered/cprogress/actions/workflows/ci.yml/badge.svg)](https://github.com/petethered/cprogress/actions/workflows/ci.yml)
+
 `cp` for macOS, with a progress bar.
 
 Copying a large tree with `cp` tells you nothing until it finishes. `cprogress`
@@ -26,12 +28,18 @@ vacation.mov  44%[==================>                ] 1.24G/2.79G  279MB/s  eta
 
 ## Install
 
-Requires a Rust toolchain and macOS.
+Requires macOS and Rust 1.85 or later.
 
 ```sh
-git clone https://github.com/peterazuolas/cprogress
+cargo install --locked --git https://github.com/petethered/cprogress
+```
+
+Or from a clone:
+
+```sh
+git clone https://github.com/petethered/cprogress
 cd cprogress
-cargo install --path .
+cargo install --locked --path .
 ```
 
 Or build and place the binary yourself:
@@ -77,7 +85,7 @@ alias cp=cprogress
 ```
 
 Diagnostics and `-v` lines use the same streams and wording `cp` uses, so a
-script sees what it expects — with the exceptions in "Not supported" above.
+script sees what it expects — with the exceptions in "Not supported" below.
 
 ## Not supported
 
