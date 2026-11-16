@@ -1,2 +1,7 @@
 /target
 /masscopy.bash
+.DS_Store
+
+# Local agent state: session logs and per-task working files from the build.
+/.claude/
+/.superpowers/
