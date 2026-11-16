@@ -23,7 +23,10 @@ extern "C" fn handle_sigint(_signal: libc::c_int) {
 
 fn install_sigint_handler() {
     unsafe {
-        libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
     }
 }
 
