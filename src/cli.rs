@@ -229,9 +229,18 @@ mod tests {
             CliError::Unsupported(c) => assert_eq!(c, 'p'),
             other => panic!("wrong error: {other:?}"),
         }
-        assert!(matches!(parse_err(&["-i", "a", "b"]), CliError::Unsupported(_)));
-        assert!(matches!(parse_err(&["-n", "a", "b"]), CliError::Unsupported(_)));
-        assert!(matches!(parse_err(&["-a", "a", "b"]), CliError::Unsupported(_)));
+        assert!(matches!(
+            parse_err(&["-i", "a", "b"]),
+            CliError::Unsupported(_)
+        ));
+        assert!(matches!(
+            parse_err(&["-n", "a", "b"]),
+            CliError::Unsupported(_)
+        ));
+        assert!(matches!(
+            parse_err(&["-a", "a", "b"]),
+            CliError::Unsupported(_)
+        ));
     }
 
     #[test]
@@ -308,13 +317,22 @@ mod tests {
 
     #[test]
     fn unsupported_flag_inside_a_cluster_is_caught() {
-        assert!(matches!(parse_err(&["-Rp", "a", "b"]), CliError::Unsupported(_)));
+        assert!(matches!(
+            parse_err(&["-Rp", "a", "b"]),
+            CliError::Unsupported(_)
+        ));
     }
 
     #[test]
     fn unknown_flags_are_rejected() {
-        assert!(matches!(parse_err(&["-z", "a", "b"]), CliError::UnknownFlag(_)));
-        assert!(matches!(parse_err(&["--bogus", "a", "b"]), CliError::UnknownFlag(_)));
+        assert!(matches!(
+            parse_err(&["-z", "a", "b"]),
+            CliError::UnknownFlag(_)
+        ));
+        assert!(matches!(
+            parse_err(&["--bogus", "a", "b"]),
+            CliError::UnknownFlag(_)
+        ));
         assert!(matches!(
             parse_err(&["--progress=bogus", "a", "b"]),
             CliError::UnknownFlag(_)

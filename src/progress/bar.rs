@@ -294,7 +294,11 @@ mod tests {
             flushed.contains("Permission denied"),
             "the note was never flushed: {flushed:?}"
         );
-        assert!(sink.pending.is_empty(), "output left unflushed: {:?}", sink.pending);
+        assert!(
+            sink.pending.is_empty(),
+            "output left unflushed: {:?}",
+            sink.pending
+        );
     }
 
     #[test]
@@ -416,7 +420,10 @@ mod tests {
         }
         assert_eq!(rendered(verbose), "src -> dst\n");
         let out = rendered(sink);
-        assert!(!out.contains("src -> dst"), "-v leaked onto the bar stream: {out:?}");
+        assert!(
+            !out.contains("src -> dst"),
+            "-v leaked onto the bar stream: {out:?}"
+        );
         // The bar stream still carries the erase and the redraw.
         assert!(out.contains("\x1b[2K"), "bar was not cleared: {out:?}");
         assert!(
@@ -437,7 +444,10 @@ mod tests {
         }
         let out = rendered(sink);
         assert!(out.contains("copied in"), "no summary: {out:?}");
-        assert!(out.ends_with('\n'), "summary not newline-terminated: {out:?}");
+        assert!(
+            out.ends_with('\n'),
+            "summary not newline-terminated: {out:?}"
+        );
     }
 
     #[test]

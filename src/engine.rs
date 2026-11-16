@@ -317,9 +317,13 @@ pub fn run(
                     runner.verbose(src, dst);
                 }
             }
-            CopyOp::CopyFile { src, dst, size, mode, display } => {
-                runner.copy_file(src, dst, *size, *mode, display)
-            }
+            CopyOp::CopyFile {
+                src,
+                dst,
+                size,
+                mode,
+                display,
+            } => runner.copy_file(src, dst, *size, *mode, display),
         }
     }
 
@@ -443,7 +447,10 @@ mod tests {
         assert_eq!(fs::read(dst.join("sub/g.txt")).expect("read"), b"world");
         let link_meta = fs::symlink_metadata(dst.join("link")).expect("stat");
         assert!(link_meta.file_type().is_symlink(), "link was followed");
-        assert_eq!(fs::read_link(dst.join("link")).expect("readlink"), Path::new("f.txt"));
+        assert_eq!(
+            fs::read_link(dst.join("link")).expect("readlink"),
+            Path::new("f.txt")
+        );
     }
 
     #[test]
@@ -612,15 +619,31 @@ mod tests {
 
         assert!(!outcome.failed, "unexpected failure: {:?}", spy.notes);
         assert_eq!(fs::read(dst.join("ro/f.txt")).expect("read"), b"data");
-        assert_eq!(fs::read(dst.join("ro/nested/g.txt")).expect("read"), b"deep");
+        assert_eq!(
+            fs::read(dst.join("ro/nested/g.txt")).expect("read"),
+            b"deep"
+        );
         // The restrictive mode is still applied, just after populating.
-        let mode = fs::metadata(dst.join("ro")).expect("stat").permissions().mode() & 0o777;
+        let mode = fs::metadata(dst.join("ro"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o555 & !umask(), "got {mode:o}");
-        let nested = fs::metadata(dst.join("ro/nested")).expect("stat").permissions().mode() & 0o777;
+        let nested = fs::metadata(dst.join("ro/nested"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(nested, 0o555 & !umask(), "got {nested:o}");
 
         // Let tempfile clean up.
-        for p in [dst.join("ro/nested"), dst.join("ro"), src.join("ro/nested"), src.join("ro")] {
+        for p in [
+            dst.join("ro/nested"),
+            dst.join("ro"),
+            src.join("ro/nested"),
+            src.join("ro"),
+        ] {
             fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("restore");
         }
     }
@@ -649,7 +672,10 @@ mod tests {
         assert!(outcome.failed);
         assert_eq!(
             spy.notes,
-            vec![format!("cprogress: {}: Not a directory", dst.join("a").display())],
+            vec![format!(
+                "cprogress: {}: Not a directory",
+                dst.join("a").display()
+            )],
             "expected exactly one error naming the cause"
         );
         assert_eq!(spy.advanced, total, "aggregate did not reach the total");
@@ -683,7 +709,12 @@ mod tests {
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("restore chmod");
 
         assert!(outcome.failed);
-        assert_eq!(spy.notes.len(), 1, "expected one error, got {:?}", spy.notes);
+        assert_eq!(
+            spy.notes.len(),
+            1,
+            "expected one error, got {:?}",
+            spy.notes
+        );
         assert!(
             spy.verbose.is_empty(),
             "a pruned op was reported as copied: {:?}",
@@ -718,7 +749,12 @@ mod tests {
         // Exactly one error proves the prune fired; a naive string-prefix
         // comparison in under_failed_dir would additionally swallow dest/ab
         // and fail the read below.
-        assert_eq!(spy.notes.len(), 1, "expected one error, got {:?}", spy.notes);
+        assert_eq!(
+            spy.notes.len(),
+            1,
+            "expected one error, got {:?}",
+            spy.notes
+        );
         assert_eq!(
             fs::read(dst.join("ab/g")).expect("sibling should have been copied"),
             b"2"

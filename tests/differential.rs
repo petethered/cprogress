@@ -16,8 +16,7 @@ fn make_fixture(root: &Path) {
     fs::write(root.join("sub/deeper/deep.bin"), vec![7u8; 3_000_000]).expect("write");
     symlink("hello.txt", root.join("link-to-file")).expect("symlink");
     symlink("sub", root.join("link-to-dir")).expect("symlink");
-    fs::set_permissions(root.join("hello.txt"), fs::Permissions::from_mode(0o640))
-        .expect("chmod");
+    fs::set_permissions(root.join("hello.txt"), fs::Permissions::from_mode(0o640)).expect("chmod");
     fs::set_permissions(root.join("sub"), fs::Permissions::from_mode(0o750)).expect("chmod");
 }
 
@@ -181,13 +180,24 @@ fn overwriting_preserves_the_destination_mode_like_bin_cp() {
         fs::set_permissions(p, fs::Permissions::from_mode(0o600)).expect("chmod");
     }
 
-    Command::new(BIN).arg(&src).arg(&ours).status().expect("run");
-    Command::new("/bin/cp").arg(&src).arg(&theirs).status().expect("run");
+    Command::new(BIN)
+        .arg(&src)
+        .arg(&ours)
+        .status()
+        .expect("run");
+    Command::new("/bin/cp")
+        .arg(&src)
+        .arg(&theirs)
+        .status()
+        .expect("run");
 
     let m1 = fs::metadata(&ours).expect("stat").permissions().mode() & 0o777;
     let m2 = fs::metadata(&theirs).expect("stat").permissions().mode() & 0o777;
     assert_eq!(m1, m2, "mode differs from cp");
-    assert_eq!(fs::read(&ours).expect("read"), fs::read(&theirs).expect("read"));
+    assert_eq!(
+        fs::read(&ours).expect("read"),
+        fs::read(&theirs).expect("read")
+    );
 }
 
 #[test]
@@ -199,14 +209,34 @@ fn exit_codes_match_bin_cp() {
 
     // A directory without -R.
     let ours = Command::new(BIN).arg(&dir).arg(&out).output().expect("run");
-    let theirs = Command::new("/bin/cp").arg(&dir).arg(&out).output().expect("run");
-    assert_eq!(ours.status.code(), theirs.status.code(), "dir-without-R code");
+    let theirs = Command::new("/bin/cp")
+        .arg(&dir)
+        .arg(&out)
+        .output()
+        .expect("run");
+    assert_eq!(
+        ours.status.code(),
+        theirs.status.code(),
+        "dir-without-R code"
+    );
 
     // A missing source.
     let missing = td.path().join("nope");
-    let ours = Command::new(BIN).arg(&missing).arg(&out).output().expect("run");
-    let theirs = Command::new("/bin/cp").arg(&missing).arg(&out).output().expect("run");
-    assert_eq!(ours.status.code(), theirs.status.code(), "missing-source code");
+    let ours = Command::new(BIN)
+        .arg(&missing)
+        .arg(&out)
+        .output()
+        .expect("run");
+    let theirs = Command::new("/bin/cp")
+        .arg(&missing)
+        .arg(&out)
+        .output()
+        .expect("run");
+    assert_eq!(
+        ours.status.code(),
+        theirs.status.code(),
+        "missing-source code"
+    );
 
     // A usage error.
     let ours = Command::new(BIN).output().expect("run");
@@ -237,7 +267,10 @@ fn verbose_goes_to_stdout_like_bin_cp() {
         .expect("run cp");
 
     assert!(!ours.stdout.is_empty(), "-v printed nothing on stdout");
-    assert!(!theirs.stdout.is_empty(), "test assumption broken: cp -v was silent");
+    assert!(
+        !theirs.stdout.is_empty(),
+        "test assumption broken: cp -v was silent"
+    );
     assert!(
         String::from_utf8_lossy(&ours.stdout).contains(" -> "),
         "got {:?}",
@@ -248,7 +281,10 @@ fn verbose_goes_to_stdout_like_bin_cp() {
         "-v leaked onto stderr: {:?}",
         String::from_utf8_lossy(&ours.stderr)
     );
-    assert!(theirs.stderr.is_empty(), "test assumption broken: cp -v used stderr");
+    assert!(
+        theirs.stderr.is_empty(),
+        "test assumption broken: cp -v used stderr"
+    );
 }
 
 #[test]
@@ -275,10 +311,22 @@ fn errors_stay_on_stderr_while_verbose_uses_stdout() {
     let stdout = String::from_utf8_lossy(&ours.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&ours.stderr).into_owned();
 
-    assert!(stdout.contains("good.txt -> "), "-v line missing from stdout: {stdout:?}");
-    assert!(!stdout.contains("Permission denied"), "an error reached stdout: {stdout:?}");
-    assert!(stderr.contains("Permission denied"), "error missing from stderr: {stderr:?}");
-    assert!(!stderr.contains(" -> "), "a -v line reached stderr: {stderr:?}");
+    assert!(
+        stdout.contains("good.txt -> "),
+        "-v line missing from stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Permission denied"),
+        "an error reached stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("Permission denied"),
+        "error missing from stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains(" -> "),
+        "a -v line reached stderr: {stderr:?}"
+    );
     assert_eq!(ours.status.code(), Some(1));
 }
 
@@ -298,18 +346,34 @@ fn symlinks_without_recursive_are_followed_like_bin_cp() {
         let ours = td.path().join(format!("ours-{name}"));
         let theirs = td.path().join(format!("theirs-{name}"));
 
-        let a = Command::new(BIN).arg(&src).arg(&ours).output().expect("run cprogress");
-        let b = Command::new("/bin/cp").arg(&src).arg(&theirs).output().expect("run cp");
+        let a = Command::new(BIN)
+            .arg(&src)
+            .arg(&ours)
+            .output()
+            .expect("run cprogress");
+        let b = Command::new("/bin/cp")
+            .arg(&src)
+            .arg(&theirs)
+            .output()
+            .expect("run cp");
 
-        assert_eq!(a.status.code(), b.status.code(), "{name}: exit code differs");
+        assert_eq!(
+            a.status.code(),
+            b.status.code(),
+            "{name}: exit code differs"
+        );
         assert_eq!(
             String::from_utf8_lossy(&a.stderr).replace("cprogress: ", "cp: "),
             String::from_utf8_lossy(&b.stderr),
             "{name}: stderr differs"
         );
 
-        let mine = fs::symlink_metadata(&ours).ok().map(|m| m.file_type().is_symlink());
-        let reference = fs::symlink_metadata(&theirs).ok().map(|m| m.file_type().is_symlink());
+        let mine = fs::symlink_metadata(&ours)
+            .ok()
+            .map(|m| m.file_type().is_symlink());
+        let reference = fs::symlink_metadata(&theirs)
+            .ok()
+            .map(|m| m.file_type().is_symlink());
         assert_eq!(mine, reference, "{name}: destination kind differs");
     }
 
@@ -317,7 +381,10 @@ fn symlinks_without_recursive_are_followed_like_bin_cp() {
     // the followed link is a regular file with the target's contents.
     let followed = td.path().join("ours-to-file");
     assert!(
-        !fs::symlink_metadata(&followed).expect("lstat").file_type().is_symlink(),
+        !fs::symlink_metadata(&followed)
+            .expect("lstat")
+            .file_type()
+            .is_symlink(),
         "the link was preserved instead of followed"
     );
     assert_eq!(fs::read(&followed).expect("read"), b"hello");
@@ -334,7 +401,11 @@ fn copying_a_file_onto_itself_reads_exactly_like_bin_cp() {
     fs::hard_link(&a, &hard).expect("hard_link");
 
     let ours = Command::new(BIN).arg(&a).arg(&hard).output().expect("run");
-    let theirs = Command::new("/bin/cp").arg(&a).arg(&hard).output().expect("run");
+    let theirs = Command::new("/bin/cp")
+        .arg(&a)
+        .arg(&hard)
+        .output()
+        .expect("run");
 
     assert_eq!(
         String::from_utf8_lossy(&ours.stderr).replace("cprogress: ", "cp: "),
@@ -359,11 +430,25 @@ fn a_read_only_source_directory_keeps_its_contents_like_bin_cp() {
 
     let ours = td.path().join("ours");
     let theirs = td.path().join("theirs");
-    let a = Command::new(BIN).args(["-R"]).arg(&src).arg(&ours).output().expect("run");
-    let b = Command::new("/bin/cp").args(["-R"]).arg(&src).arg(&theirs).output().expect("run");
+    let a = Command::new(BIN)
+        .args(["-R"])
+        .arg(&src)
+        .arg(&ours)
+        .output()
+        .expect("run");
+    let b = Command::new("/bin/cp")
+        .args(["-R"])
+        .arg(&src)
+        .arg(&theirs)
+        .output()
+        .expect("run");
 
     assert_eq!(a.status.code(), b.status.code(), "exit code differs");
-    assert_eq!(describe(&ours), describe(&theirs), "tree structure or modes differ");
+    assert_eq!(
+        describe(&ours),
+        describe(&theirs),
+        "tree structure or modes differ"
+    );
     assert_eq!(contents(&ours), contents(&theirs), "file contents differ");
     assert!(
         b.stderr.is_empty(),
@@ -373,9 +458,12 @@ fn a_read_only_source_directory_keeps_its_contents_like_bin_cp() {
 
     // Restore so tempfile can clean up.
     for p in [
-        src.join("ro/deeper"), src.join("ro"),
-        ours.join("ro/deeper"), ours.join("ro"),
-        theirs.join("ro/deeper"), theirs.join("ro"),
+        src.join("ro/deeper"),
+        src.join("ro"),
+        ours.join("ro/deeper"),
+        ours.join("ro"),
+        theirs.join("ro/deeper"),
+        theirs.join("ro"),
     ] {
         let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
     }
@@ -399,8 +487,18 @@ fn a_destination_blocked_by_a_file_reports_like_bin_cp() {
         fs::write(d.join("a"), b"blocker").expect("write");
     }
 
-    let a = Command::new(BIN).args(["-R"]).arg(&src).arg(&ours).output().expect("run");
-    let b = Command::new("/bin/cp").args(["-R"]).arg(&src).arg(&theirs).output().expect("run");
+    let a = Command::new(BIN)
+        .args(["-R"])
+        .arg(&src)
+        .arg(&ours)
+        .output()
+        .expect("run");
+    let b = Command::new("/bin/cp")
+        .args(["-R"])
+        .arg(&src)
+        .arg(&theirs)
+        .output()
+        .expect("run");
 
     // The two runs use different destination directories, so normalise those
     // names away before comparing; everything else must be identical.
@@ -474,7 +572,10 @@ fn help_prints_a_manual_on_stdout_and_succeeds() {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("NAME"), "{flag}: no NAME section");
         assert!(text.contains("SYNOPSIS"), "{flag}: no SYNOPSIS section");
-        assert!(text.contains("EXIT STATUS"), "{flag}: no EXIT STATUS section");
+        assert!(
+            text.contains("EXIT STATUS"),
+            "{flag}: no EXIT STATUS section"
+        );
         assert!(
             text.contains("-p -i -n"),
             "{flag}: unsupported options not listed"

@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 /// and symlinks, not just regular files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyOp {
-    CreateDir { src: PathBuf, dst: PathBuf, mode: u32 },
+    CreateDir {
+        src: PathBuf,
+        dst: PathBuf,
+        mode: u32,
+    },
     /// `mode` is the source's permission bits as seen during the scan, so the
     /// engine never has to re-stat the source after copying it. `display` is
     /// `src` shortened to be relative to the source root's parent directory
@@ -17,8 +21,18 @@ pub enum CopyOp {
     /// It exists only for the progress bar's per-file line, which would
     /// otherwise be dominated by a long absolute prefix; `-v` and error
     /// messages keep using `src`/`dst` in full.
-    CopyFile { src: PathBuf, dst: PathBuf, size: u64, mode: u32, display: PathBuf },
-    Symlink { src: PathBuf, target: PathBuf, dst: PathBuf },
+    CopyFile {
+        src: PathBuf,
+        dst: PathBuf,
+        size: u64,
+        mode: u32,
+        display: PathBuf,
+    },
+    Symlink {
+        src: PathBuf,
+        target: PathBuf,
+        dst: PathBuf,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -93,7 +107,13 @@ impl Scanner<'_> {
         let display = display_path(&src, root_parent);
         let size = meta.len();
         let mode = meta.permissions().mode() & 0o7777;
-        self.plan.ops.push(CopyOp::CopyFile { src, dst, size, mode, display });
+        self.plan.ops.push(CopyOp::CopyFile {
+            src,
+            dst,
+            size,
+            mode,
+            display,
+        });
         self.plan.total_bytes = self.plan.total_bytes.saturating_add(size);
         self.plan.file_count += 1;
         (self.tick)(self.plan.file_count, self.plan.total_bytes);
@@ -260,11 +280,7 @@ mod tests {
         }
     }
 
-    fn build_in(
-        sources: &[PathBuf],
-        dest: &Path,
-        o: &Options,
-    ) -> Result<Plan, PlanError> {
+    fn build_in(sources: &[PathBuf], dest: &Path, o: &Options) -> Result<Plan, PlanError> {
         let mut tick = |_f: usize, _b: u64| {};
         build(sources, dest, o, &mut tick)
     }
@@ -533,7 +549,9 @@ mod tests {
         let plan = build_in(std::slice::from_ref(&link), &dst, &opts(false)).expect("plan");
         assert!(plan.errors.is_empty(), "got errors: {:?}", plan.errors);
         match &plan.ops[..] {
-            [CopyOp::CopyFile { src, dst: d, size, .. }] => {
+            [CopyOp::CopyFile {
+                src, dst: d, size, ..
+            }] => {
                 assert_eq!(src, &link);
                 assert_eq!(d, &dst);
                 // The size comes from the target, not the link itself.
@@ -623,7 +641,11 @@ mod tests {
         let dst = td.path().join("out");
 
         let plan = build_in(&[link], &dst, &opts(true)).expect("plan");
-        assert!(matches!(plan.ops[..], [CopyOp::Symlink { .. }]), "{:?}", plan.ops);
+        assert!(
+            matches!(plan.ops[..], [CopyOp::Symlink { .. }]),
+            "{:?}",
+            plan.ops
+        );
     }
 
     #[test]
@@ -648,8 +670,12 @@ mod tests {
         let out = td.path().join("out");
         fs::create_dir(&out).expect("mkdir");
 
-        let with_slash = build_in(&[PathBuf::from(format!("{}/", src.display()))], &out, &opts(true))
-            .expect("plan");
+        let with_slash = build_in(
+            &[PathBuf::from(format!("{}/", src.display()))],
+            &out,
+            &opts(true),
+        )
+        .expect("plan");
         let without = build_in(&[src], &out, &opts(true)).expect("plan");
         assert_eq!(with_slash.total_bytes, without.total_bytes);
         assert_eq!(with_slash.ops.len(), without.ops.len());

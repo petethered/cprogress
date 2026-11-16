@@ -78,7 +78,10 @@ mod tests {
         p.advance(500);
         p.finish();
         assert!(sink.is_empty(), "Null wrote progress output: {sink:?}");
-        assert!(verbose.is_empty(), "Null wrote progress output: {verbose:?}");
+        assert!(
+            verbose.is_empty(),
+            "Null wrote progress output: {verbose:?}"
+        );
     }
 
     #[test]
@@ -107,7 +110,10 @@ mod tests {
             let mut p = Null::new(&mut sink, &mut verbose);
             p.verbose("a.txt -> b.txt");
         }
-        assert_eq!(String::from_utf8(verbose).expect("utf8"), "a.txt -> b.txt\n");
+        assert_eq!(
+            String::from_utf8(verbose).expect("utf8"),
+            "a.txt -> b.txt\n"
+        );
         assert!(sink.is_empty(), "a -v line reached the error stream");
     }
 }

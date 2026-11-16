@@ -159,7 +159,10 @@ pub fn single_line(
     }
     let name = middle_ellipsize(path, name_budget);
     let bar_cols = width.saturating_sub(name.chars().count() + overhead);
-    format!("{name}{pct}[{}]{tail}", bar(bar_cols, fraction(done, total)))
+    format!(
+        "{name}{pct}[{}]{tail}",
+        bar(bar_cols, fraction(done, total))
+    )
 }
 
 /// `Scanning... 41,203 files, 88.2G`
@@ -336,7 +339,10 @@ mod tests {
         // against, so a small file still gets a bar and an ETA.
         // Even, so the halfway point lands on exactly 50% rather than flooring.
         let small = FILE_BAR_MIN_BYTES - 2;
-        assert!(small < FILE_BAR_MIN_BYTES, "fixture must be under the threshold");
+        assert!(
+            small < FILE_BAR_MIN_BYTES,
+            "fixture must be under the threshold"
+        );
         assert!(
             !file_line(80, "notes.txt", small / 2, small).contains('['),
             "fixture should get no bar from the multi-file layout"
@@ -384,7 +390,11 @@ mod tests {
 
     #[test]
     fn scan_line_says_one_file_not_one_files() {
-        assert!(scan_line(1, 1024).contains("1 file,"), "{}", scan_line(1, 1024));
+        assert!(
+            scan_line(1, 1024).contains("1 file,"),
+            "{}",
+            scan_line(1, 1024)
+        );
         assert!(scan_line(0, 0).contains("0 files,"), "{}", scan_line(0, 0));
         assert!(scan_line(2, 0).contains("2 files,"), "{}", scan_line(2, 0));
     }

@@ -101,7 +101,10 @@ mod tests {
             !text.contains("os error"),
             "the raw errno leaked back in: {text:?}"
         );
-        assert!(text.contains("9999"), "the code should still be named: {text:?}");
+        assert!(
+            text.contains("9999"),
+            "the code should still be named: {text:?}"
+        );
     }
 
     #[test]

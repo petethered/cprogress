@@ -121,22 +121,43 @@ mod tests {
     fn usage_has_two_lines_in_cp_format() {
         let lines: Vec<&str> = USAGE.lines().collect();
         assert_eq!(lines.len(), 2, "usage should be two lines");
-        assert!(lines[0].starts_with("usage: cprogress "), "got {:?}", lines[0]);
-        assert!(lines[0].ends_with("source_file target_file"), "got {:?}", lines[0]);
+        assert!(
+            lines[0].starts_with("usage: cprogress "),
+            "got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].ends_with("source_file target_file"),
+            "got {:?}",
+            lines[0]
+        );
         assert!(
             lines[1].ends_with("source_file ... target_directory"),
             "got {:?}",
             lines[1]
         );
         // The continuation line is aligned under the first, as cp does.
-        assert!(lines[1].starts_with("       cprogress "), "got {:?}", lines[1]);
+        assert!(
+            lines[1].starts_with("       cprogress "),
+            "got {:?}",
+            lines[1]
+        );
     }
 
     #[test]
     fn manual_documents_the_supported_and_unsupported_sets() {
         for expected in [
-            "NAME", "SYNOPSIS", "DESCRIPTION", "EXIT STATUS", "SEE ALSO",
-            "-R", "-f", "-v", "--progress", "-p", "alias cp=cprogress",
+            "NAME",
+            "SYNOPSIS",
+            "DESCRIPTION",
+            "EXIT STATUS",
+            "SEE ALSO",
+            "-R",
+            "-f",
+            "-v",
+            "--progress",
+            "-p",
+            "alias cp=cprogress",
         ] {
             assert!(MANUAL.contains(expected), "manual missing {expected:?}");
         }
@@ -152,7 +173,11 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let man = std::fs::read_to_string(root.join("man/cprogress.1")).expect("man page");
         let readme = std::fs::read_to_string(root.join("README.md")).expect("README");
-        let surfaces = [("MANUAL", MANUAL), ("man page", man.as_str()), ("README", readme.as_str())];
+        let surfaces = [
+            ("MANUAL", MANUAL),
+            ("man page", man.as_str()),
+            ("README", readme.as_str()),
+        ];
 
         for (name, text) in surfaces {
             // Derived from the constant, not a snapshot of it, so the next

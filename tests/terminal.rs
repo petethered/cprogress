@@ -96,10 +96,16 @@ fn the_bar_uses_the_terminal_while_verbose_lines_go_to_stdout() {
     assert!(status.success());
 
     // The bar drew on the terminal.
-    assert!(terminal.contains("total"), "no aggregate bar on the tty: {terminal:?}");
+    assert!(
+        terminal.contains("total"),
+        "no aggregate bar on the tty: {terminal:?}"
+    );
     // Every -v line landed on stdout, one per op (3 files + the directory).
     let arrows = stdout_text.lines().filter(|l| l.contains(" -> ")).count();
-    assert_eq!(arrows, 4, "expected 4 -v lines on stdout, got {stdout_text:?}");
+    assert_eq!(
+        arrows, 4,
+        "expected 4 -v lines on stdout, got {stdout_text:?}"
+    );
     // And none of them leaked onto the terminal.
     assert!(
         !terminal.contains(" -> "),
