@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # stable, and the rust-version declared in Cargo.toml.
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      # Includes the differential tests against /bin/cp. The 5 GiB
+      # large-file test stays #[ignore]d here, as it does locally.
+      - run: cargo test --locked
