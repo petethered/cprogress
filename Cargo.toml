@@ -7,7 +7,6 @@ description = "A macOS cp with a wget-style progress bar"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/petethered/cprogress"
-homepage = "https://github.com/petethered/cprogress"
 keywords = ["cp", "copy", "progress", "cli", "macos"]
 categories = ["command-line-utilities", "filesystem"]
 
